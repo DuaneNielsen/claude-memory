@@ -7,18 +7,16 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from .query import search
-from .store import MemoryStore
-
 log = logging.getLogger(__name__)
 
 server = Server("claude-memory")
-_store: MemoryStore | None = None
+_store = None
 
 
-def get_store() -> MemoryStore:
+def get_store():
     global _store
     if _store is None:
+        from .store import MemoryStore
         _store = MemoryStore()
     return _store
 
@@ -30,8 +28,10 @@ async def list_tools() -> list[Tool]:
             name="search_conversation_memory",
             description=(
                 "Search past Claude Code conversations for relevant context. "
-                "Use this when the user references past work, asks 'did we discuss...', "
-                "or when historical context would help with the current task."
+                "IMPORTANT: Search this at the start of every new conversation to check for prior work "
+                "related to the user's first message. Also search when the user references past work, "
+                "asks about previous decisions, or when the task involves systems that may have been "
+                "configured or debugged before. The query is fast and a miss costs nothing."
             ),
             inputSchema={
                 "type": "object",
@@ -73,6 +73,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             text="Memory store is empty. Run `claude-memory ingest` first.",
         )]
 
+    from .query import search
     results = search(store, query, project=project, max_results=max_results)
 
     if not results:

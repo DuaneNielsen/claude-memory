@@ -28,6 +28,11 @@ def main():
     # stats
     sub.add_parser("stats", help="Show memory store statistics")
 
+    # sessions
+    sessions_p = sub.add_parser("sessions", help="List ingested sessions with details")
+    sessions_p.add_argument("--project", help="Filter to project")
+    sessions_p.add_argument("--sort", choices=["date", "edus", "words"], default="date")
+
     # dump
     dump_p = sub.add_parser("dump", help="Dump all EDUs as readable text or JSON")
     dump_p.add_argument("--json", action="store_true", dest="as_json", help="Output as JSON")
@@ -80,6 +85,53 @@ def main():
             print("By project:")
             for p, c in sorted(projects.items(), key=lambda x: -x[1]):
                 print(f"  {p}: {c} sessions")
+
+    elif args.command == "sessions":
+        from .ingest import load_ingestion_state
+        from .parser import parse_session_file
+        from pathlib import Path
+        state = load_ingestion_state()
+        rows = []
+        for sid, info in state.items():
+            project = info.get("project", "?")
+            if args.project and project != args.project:
+                continue
+            edu_count = info.get("edu_count", 0)
+            date = (info.get("timestamp") or "")[:10]
+            # Count words from the actual session file
+            path = Path(info.get("file_path", ""))
+            words = 0
+            turns = 0
+            if path.exists():
+                session = parse_session_file(path)
+                if session:
+                    turns = len(session.turns)
+                    words = sum(len(t.text.split()) for t in session.turns)
+            rows.append((date, project, sid[:8], turns, words, edu_count))
+
+        sort_key = {"date": 0, "edus": 5, "words": 4}[args.sort]
+        rows.sort(key=lambda r: r[sort_key], reverse=(args.sort != "date"))
+
+        from rich.console import Console
+        from rich.table import Table
+        table = Table(title="Ingested Sessions")
+        table.add_column("Date", style="cyan")
+        table.add_column("Project", style="green")
+        table.add_column("Session")
+        table.add_column("Turns", justify="right")
+        table.add_column("Words", justify="right")
+        table.add_column("EDUs", justify="right", style="yellow")
+        for date, project, sid, turns, words, edus in rows:
+            table.add_row(date, project, sid, str(turns), f"{words:,}", str(edus))
+        table.add_section()
+        table.add_row(
+            "Total", "", "",
+            str(sum(r[3] for r in rows)),
+            f"{sum(r[4] for r in rows):,}",
+            str(sum(r[5] for r in rows)),
+            style="bold",
+        )
+        Console().print(table)
 
     elif args.command == "dump":
         import json as json_mod
