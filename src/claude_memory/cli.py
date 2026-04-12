@@ -38,6 +38,13 @@ def main():
     dump_p.add_argument("--json", action="store_true", dest="as_json", help="Output as JSON")
     dump_p.add_argument("--project", help="Filter to project")
 
+    # reset
+    reset_p = sub.add_parser("reset", help="Clear ingestion state and/or stored EDUs")
+    reset_p.add_argument("--session", help="Reset a specific session ID (prefix match)")
+    reset_p.add_argument("--project", help="Reset all sessions for a project")
+    reset_p.add_argument("--all", action="store_true", help="Reset everything")
+    reset_p.add_argument("--state-only", action="store_true", help="Only clear ingestion state, keep EDUs in ChromaDB")
+
     # serve (MCP server)
     sub.add_parser("serve", help="Run MCP server (stdio)")
 
@@ -155,6 +162,42 @@ def main():
                 project = meta.get("project", "?")
                 print(f"[{project}, {date}] {doc}")
                 print()
+
+    elif args.command == "reset":
+        from .ingest import load_ingestion_state, save_ingestion_state
+        from .store import MemoryStore
+        state = load_ingestion_state()
+        store = MemoryStore()
+
+        if not args.all and not args.session and not args.project:
+            print("Specify --all, --session <id>, or --project <name>")
+            sys.exit(1)
+
+        # Find matching session IDs
+        if args.all:
+            targets = list(state.keys())
+        elif args.project:
+            targets = [sid for sid, info in state.items() if info.get("project") == args.project]
+        else:
+            targets = [sid for sid in state if sid.startswith(args.session)]
+
+        if not targets:
+            print("No matching sessions found.")
+            sys.exit(0)
+
+        # Clear EDUs from ChromaDB unless --state-only
+        if not args.state_only:
+            for sid in targets:
+                deleted = store.delete_session(sid)
+                if deleted:
+                    print(f"Deleted {deleted} EDUs for {sid[:8]}")
+
+        # Clear ingestion state
+        for sid in targets:
+            del state[sid]
+        save_ingestion_state(state)
+
+        print(f"Reset {len(targets)} session(s). Run `claude-memory ingest` to reprocess.")
 
     elif args.command == "serve":
         from .server import main as serve_main
