@@ -1,0 +1,23 @@
+[project]
+name = "claude-memory"
+version = "0.1.0"
+description = "Local memory system for Claude Code conversations"
+readme = "README.md"
+authors = [
+    { name = "Duane Nielsen", email = "duane.nielsen.rocks@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "chromadb>=1.0.0",
+    "sentence-transformers>=4.0.0",
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+claude-memory = "claude_memory.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8.4,<0.9.0"]
+build-backend = "uv_build"
