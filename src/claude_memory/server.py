@@ -194,10 +194,22 @@ async def _handle_ingest(arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Failed to start ingestion: {e}")]
 
     from .ingest import get_pending_sessions
+    from .extractor import count_chunks, count_chunks_incremental
     pending = get_pending_sessions()
     count = len(pending)
 
-    lines = [f"Ingestion started in the background for {count} conversations."]
+    # Estimate time: ~30s per chunk with sonnet
+    total_chunks = 0
+    for session, old_turn_count in pending:
+        if old_turn_count > 0:
+            total_chunks += count_chunks_incremental(session, old_turn_count)
+        else:
+            total_chunks += count_chunks(session)
+    est_minutes = max(1, (total_chunks * 30) // 60)
+
+    lines = [f"Ingestion started in the background for {count} conversations (~{total_chunks} chunks)."]
+    lines.append(f"Estimated time: ~{est_minutes} minutes.")
+    lines.append("Tell the user approximately how long this will take.")
     lines.append("New memories will become searchable as they are processed.")
     lines.append("The user can continue working — this won't block anything.")
 
