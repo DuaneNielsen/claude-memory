@@ -32,18 +32,32 @@ def save_ingestion_state(state: dict) -> None:
     INGESTION_STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+TAIL_BYTES = 128
+
+
 def file_hash(path: Path) -> str:
-    """Fast hash of file contents."""
-    h = hashlib.md5()
+    """Signature for append-only JSONL sessions: size + md5 of last TAIL_BYTES.
+
+    Any append changes size; any rewrite changes the tail. Avoids reading the
+    full file on every status check.
+    """
+    size = path.stat().st_size
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        if size > TAIL_BYTES:
+            f.seek(-TAIL_BYTES, 2)
+        tail = f.read()
+    return f"{size}:{hashlib.md5(tail).hexdigest()}"
 
 
-def get_pending_sessions(projects_dir: Path | None = None, force: bool = False) -> list[tuple[Session, int]]:
-    """Find sessions that are new or changed. Returns (session, old_turn_count) tuples.
-    old_turn_count=0 means new session (full extraction), >0 means continuation (incremental)."""
+def get_pending_sessions(
+    projects_dir: Path | None = None, force: bool = False
+) -> list[tuple[Path, str, int]]:
+    """Find sessions that are new or changed without parsing them.
+
+    Returns (path, file_hash, old_turn_count) tuples. old_turn_count=0 means
+    new session (full extraction), >0 means continuation (incremental).
+    Callers that need Session objects should parse_session_file() themselves.
+    """
     state = load_ingestion_state()
     pending = []
     for path in discover_sessions(projects_dir):
@@ -51,11 +65,8 @@ def get_pending_sessions(projects_dir: Path | None = None, force: bool = False) 
         h = file_hash(path)
         if not force and session_id in state and state[session_id].get("hash") == h:
             continue
-        session = parse_session_file(path)
-        if session:
-            session.file_hash = h
-            old_turn_count = state.get(session_id, {}).get("turn_count", 0) if not force else 0
-            pending.append((session, old_turn_count))
+        old_turn_count = state.get(session_id, {}).get("turn_count", 0) if not force else 0
+        pending.append((path, h, old_turn_count))
     return pending
 
 
@@ -82,10 +93,22 @@ async def ingest_all(
     store = MemoryStore()
     state = load_ingestion_state()
 
-    pending = get_pending_sessions(projects_dir, force=force)
+    pending_refs = get_pending_sessions(projects_dir, force=force)
+
+    if not pending_refs:
+        log.info("No new sessions to ingest.")
+        return {"sessions": 0, "edus": 0}
+
+    # Parse sessions now that we're actually ingesting
+    pending: list[tuple[Session, int]] = []
+    for path, h, old_turn_count in pending_refs:
+        session = parse_session_file(path)
+        if session:
+            session.file_hash = h
+            pending.append((session, old_turn_count))
 
     if not pending:
-        log.info("No new sessions to ingest.")
+        log.info("No parseable sessions to ingest.")
         return {"sessions": 0, "edus": 0}
 
     # Count chunks — incremental sessions only count new turns

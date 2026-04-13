@@ -121,7 +121,7 @@ async def _handle_status() -> list[TextContent]:
     ]
 
     if pending:
-        new = sum(1 for _, otc in pending if otc == 0)
+        new = sum(1 for _, _, otc in pending if otc == 0)
         continued = len(pending) - new
         parts = []
         if new:
@@ -204,13 +204,17 @@ async def _handle_ingest(arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Failed to start ingestion: {e}")]
 
     from .ingest import get_pending_sessions
+    from .parser import parse_session_file
     from .extractor import count_chunks, count_chunks_incremental
-    pending = get_pending_sessions()
-    count = len(pending)
+    pending_refs = get_pending_sessions()
+    count = len(pending_refs)
 
     # Estimate time: ~30s per chunk with sonnet
     total_chunks = 0
-    for session, old_turn_count in pending:
+    for path, _h, old_turn_count in pending_refs:
+        session = parse_session_file(path)
+        if not session:
+            continue
         if old_turn_count > 0:
             total_chunks += count_chunks_incremental(session, old_turn_count)
         else:
