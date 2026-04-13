@@ -96,8 +96,30 @@ def chunk_turns(turns: list[Turn]) -> list[list[Turn]]:
     return chunks
 
 
+EDU_JSON_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "edus": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_turn_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                },
+                "required": ["text", "source_turn_ids"],
+            },
+        },
+    },
+    "required": ["edus"],
+})
+
+
 async def call_claude(text: str, system_prompt: str, model: str | None = None) -> dict:
-    """Call claude CLI for EDU extraction."""
+    """Call claude CLI for EDU extraction with enforced JSON schema."""
     model = model or DEFAULT_MODEL
     prompt = f"""Here is an example of the expected input and output:
 
@@ -116,7 +138,8 @@ Now process this input:
         "--model", model,
         "--tools", "",
         "--system-prompt", system_prompt,
-        "--output-format", "text",
+        "--json-schema", EDU_JSON_SCHEMA,
+        "--output-format", "json",
         "--no-session-persistence",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -131,13 +154,14 @@ Now process this input:
     if not content:
         raise ValueError("claude CLI returned empty output")
 
-    # Extract JSON from response (may have markdown fences)
-    if "```json" in content:
-        content = content.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in content:
-        content = content.split("```", 1)[1].split("```", 1)[0].strip()
+    # Parse the stream-json output — find the result entry with structured_output
+    events = json.loads(content)
+    if isinstance(events, list):
+        for event in reversed(events):
+            if isinstance(event, dict) and "structured_output" in event:
+                return event["structured_output"]
 
-    return json.loads(content)
+    raise ValueError("No structured_output found in claude CLI response")
 
 
 INCREMENTAL_SYSTEM_PROMPT = """\
@@ -180,9 +204,6 @@ def format_incremental_input(
         lines.append(f"Turn {t.turn_id} [{t.speaker}]: {t.text}")
 
     return "\n".join(lines)
-
-
-    # call_claude handles both full and incremental extraction
 
 
 async def extract_edus_incremental(
