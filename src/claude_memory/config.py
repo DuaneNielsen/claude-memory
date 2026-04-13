@@ -7,7 +7,7 @@ CHROMADB_DIR = DATA_DIR / "chromadb"
 INGESTION_STATE_FILE = DATA_DIR / "ingested_sessions.json"
 
 # Claude model for EDU extraction
-DEFAULT_MODEL = "haiku"
+DEFAULT_MODEL = "sonnet"
 
 # Embedding model
 EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5"
