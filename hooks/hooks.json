@@ -6,6 +6,20 @@
           {
             "type": "command",
             "command": "test -d \"${CLAUDE_PLUGIN_ROOT}/.venv\" || (cd \"${CLAUDE_PLUGIN_ROOT}\" && uv sync --quiet)"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/memory-check-reset.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/memory-check.sh"
           }
         ]
       }
