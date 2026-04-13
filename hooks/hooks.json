@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -d \"${CLAUDE_PLUGIN_ROOT}/.venv\" || (cd \"${CLAUDE_PLUGIN_ROOT}\" && uv sync --quiet)"
+          }
+        ]
+      }
+    ]
+  }
+}

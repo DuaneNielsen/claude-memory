@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "claude-memory": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/.venv/bin/python",
+      "args": ["-m", "claude_memory"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    }
+  }
+}
