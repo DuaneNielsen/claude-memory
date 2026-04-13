@@ -12,7 +12,6 @@ dependencies = [
     "sentence-transformers>=4.0.0",
     "mcp>=1.0.0",
     "pydantic>=2.0.0",
-    "httpx>=0.28.0",
 ]
 
 [project.scripts]

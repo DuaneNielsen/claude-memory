@@ -94,5 +94,16 @@ class MemoryStore:
             self.collection.delete(ids=ids)
         return len(ids)
 
+    def get_session_edus(self, session_id: str) -> list[dict]:
+        """Retrieve all stored EDUs for a session. Returns list of {text, metadata}."""
+        results = self.collection.get(
+            where={"session_id": session_id},
+            include=["documents", "metadatas"],
+        )
+        edus = []
+        for doc, meta in zip(results["documents"], results["metadatas"]):
+            edus.append({"text": doc, **meta})
+        return edus
+
     def count(self) -> int:
         return self.collection.count()

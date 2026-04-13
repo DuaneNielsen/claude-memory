@@ -1,16 +1,15 @@
 """Extract Elementary Discourse Units (EDUs) from conversation turns via LLM."""
 
+import asyncio
 import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
-import httpx
-
 from .config import (
     CHUNK_OVERLAP_TURNS,
-    LLM_BASE_URL,
+    DEFAULT_MODEL,
     MAX_TURNS_PER_CHUNK,
 )
 from .parser import Session, Turn
@@ -97,34 +96,165 @@ def chunk_turns(turns: list[Turn]) -> list[list[Turn]]:
     return chunks
 
 
-async def call_llm(text: str, base_url: str | None = None) -> dict:
-    """Call the local LLM with the EDU extraction prompt."""
-    url = (base_url or LLM_BASE_URL).rstrip("/") + "/v1/chat/completions"
+async def call_claude(text: str, system_prompt: str, model: str | None = None) -> dict:
+    """Call claude CLI for EDU extraction."""
+    model = model or DEFAULT_MODEL
+    prompt = f"""Here is an example of the expected input and output:
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": ONE_SHOT_INPUT},
-        {"role": "assistant", "content": ONE_SHOT_OUTPUT},
-        {"role": "user", "content": text},
-    ]
+INPUT:
+{ONE_SHOT_INPUT}
 
-    async with httpx.AsyncClient(timeout=600.0) as client:
-        resp = await client.post(url, json={
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 16384,
-        })
-        resp.raise_for_status()
-        data = resp.json()
+OUTPUT:
+{ONE_SHOT_OUTPUT}
 
-    msg = data["choices"][0]["message"]
-    content = msg.get("content") or ""
-    # Strip <think>...</think> blocks if present (Qwen thinking mode)
-    import re
-    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+Now process this input:
+
+{text}"""
+
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "-p",
+        "--model", model,
+        "--tools", "",
+        "--system-prompt", system_prompt,
+        "--output-format", "text",
+        "--no-session-persistence",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate(prompt.encode())
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {stderr.decode()}")
+
+    content = stdout.decode().strip()
     if not content:
-        raise ValueError(f"LLM returned empty content. Keys: {list(msg.keys())}")
+        raise ValueError("claude CLI returned empty output")
+
+    # Extract JSON from response (may have markdown fences)
+    if "```json" in content:
+        content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in content:
+        content = content.split("```", 1)[1].split("```", 1)[0].strip()
+
     return json.loads(content)
+
+
+INCREMENTAL_SYSTEM_PROMPT = """\
+You are a memory extraction system. You are given:
+1. Previously extracted facts (EDUs) from earlier turns of this conversation
+2. New turns that have been added since the last extraction
+
+Your job: extract NEW Elementary Discourse Units (EDUs) from ONLY the new turns. Do NOT repeat any fact already captured in the existing EDUs.
+
+Requirements:
+1. Each EDU must be independently understandable without any other EDU or the original conversation for context.
+2. Replace all pronouns and ambiguous references with specific names, tools, paths, or details.
+3. Preserve ALL substantive information from the new turns — no detail should be lost.
+4. Infer and include temporal context. Convert relative dates to absolute where possible.
+5. Separate distinct facts into distinct EDUs. One fact per EDU.
+6. Skip conversational filler — extract only substantive content.
+7. Include the turn numbers each EDU was derived from.
+8. If a new turn merely confirms or restates something already in the existing EDUs, skip it.
+
+Output as JSON: {"edus": [{"text": "...", "source_turn_ids": [1, 2]}, ...]}
+If there are no new facts, output: {"edus": []}"""
+
+
+def format_incremental_input(
+    existing_edus: list[dict],
+    new_turns: list[Turn],
+    session_date: str,
+    project: str,
+) -> str:
+    """Format existing EDUs + new turns for incremental extraction."""
+    lines = [f"Session date: {session_date}", f"Project: {project}", ""]
+
+    lines.append("=== Previously extracted facts ===")
+    for i, edu in enumerate(existing_edus, 1):
+        lines.append(f"  {i}. {edu['text']}")
+    lines.append("")
+
+    lines.append("=== New turns (extract from these only) ===")
+    for t in new_turns:
+        lines.append(f"Turn {t.turn_id} [{t.speaker}]: {t.text}")
+
+    return "\n".join(lines)
+
+
+    # call_claude handles both full and incremental extraction
+
+
+async def extract_edus_incremental(
+    session: Session,
+    existing_edus: list[dict],
+    old_turn_count: int,
+    model: str | None = None,
+    on_chunk_done: callable = None,
+) -> list[EDU]:
+    """Extract EDUs from only the new turns, using existing EDUs as context."""
+    new_turns = session.turns[old_turn_count:]
+    if not new_turns:
+        if on_chunk_done:
+            on_chunk_done()
+        return []
+
+    session_date = session.turns[0].timestamp.strftime("%Y-%m-%d")
+    chunks = chunk_turns(new_turns)
+
+    all_edus: list[EDU] = []
+    seen_texts: set[str] = set()
+    # Include existing EDU texts in seen set to avoid duplicates
+    for edu in existing_edus:
+        seen_texts.add(edu["text"].lower())
+
+    for chunk in chunks:
+        text = format_incremental_input(existing_edus, chunk, session_date, session.project)
+        try:
+            result = await call_claude(text, INCREMENTAL_SYSTEM_PROMPT, model)
+        except Exception as e:
+            log.error(f"Incremental extraction failed for session {session.session_id}: {e}")
+            if on_chunk_done:
+                on_chunk_done()
+            continue
+
+        raw_edus = result.get("edus", [])
+        for raw in raw_edus:
+            edu_text = raw.get("text", "").strip()
+            if not edu_text:
+                continue
+            normalized = edu_text.lower()
+            if normalized in seen_texts:
+                continue
+            seen_texts.add(normalized)
+
+            source_ids = raw.get("source_turn_ids", [])
+            speakers = list({t.speaker for t in chunk if t.turn_id in source_ids})
+            source_turns = [t for t in chunk if t.turn_id in source_ids]
+            ts = source_turns[0].timestamp if source_turns else new_turns[0].timestamp
+
+            all_edus.append(EDU(
+                edu_id=str(uuid.uuid4()),
+                text=edu_text,
+                source_turn_ids=source_ids,
+                session_id=session.session_id,
+                project=session.project,
+                timestamp=ts,
+                speakers=speakers,
+            ))
+
+        if on_chunk_done:
+            on_chunk_done()
+
+    return all_edus
+
+
+def count_chunks_incremental(session: Session, old_turn_count: int) -> int:
+    """Count chunks for incremental extraction."""
+    new_turns = session.turns[old_turn_count:]
+    if not new_turns:
+        return 0
+    return len(chunk_turns(new_turns))
 
 
 def count_chunks(session: Session) -> int:
@@ -134,7 +264,7 @@ def count_chunks(session: Session) -> int:
 
 async def extract_edus_from_session(
     session: Session,
-    base_url: str | None = None,
+    model: str | None = None,
     on_chunk_done: callable = None,
 ) -> list[EDU]:
     """Extract EDUs from a single session."""
@@ -150,7 +280,7 @@ async def extract_edus_from_session(
     for chunk in chunks:
         text = format_turns_for_extraction(chunk, session_date, session.project)
         try:
-            result = await call_llm(text, base_url)
+            result = await call_claude(text, SYSTEM_PROMPT, model)
         except Exception as e:
             log.error(f"LLM call failed for session {session.session_id}: {e}")
             if on_chunk_done:

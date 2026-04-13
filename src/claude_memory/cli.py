@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sys
 
-from .config import DATA_DIR, LLM_BASE_URL
+from .config import DATA_DIR, DEFAULT_MODEL
 
 
 def main():
@@ -16,8 +16,8 @@ def main():
     # ingest
     ingest_p = sub.add_parser("ingest", help="Ingest Claude Code sessions")
     ingest_p.add_argument("--force", action="store_true", help="Re-ingest all sessions")
-    ingest_p.add_argument("--llm-url", default=None, help=f"LLM endpoint (default: {LLM_BASE_URL})")
-    ingest_p.add_argument("--concurrency", type=int, default=2, help="Concurrent LLM requests (default: 2)")
+    ingest_p.add_argument("--model", default=None, help=f"Claude model (default: {DEFAULT_MODEL})")
+    ingest_p.add_argument("--concurrency", type=int, default=2, help="Concurrent extraction requests (default: 2)")
 
     # search
     search_p = sub.add_parser("search", help="Search conversation memory")
@@ -43,6 +43,7 @@ def main():
     reset_p.add_argument("--session", help="Reset a specific session ID (prefix match)")
     reset_p.add_argument("--project", help="Reset all sessions for a project")
     reset_p.add_argument("--all", action="store_true", help="Reset everything")
+    reset_p.add_argument("--partial", action="store_true", help="Reset all partially-ingested sessions (for full re-extraction)")
     reset_p.add_argument("--state-only", action="store_true", help="Only clear ingestion state, keep EDUs in ChromaDB")
 
     # serve (MCP server)
@@ -59,7 +60,7 @@ def main():
 
     if args.command == "ingest":
         from .ingest import ingest_all
-        stats = asyncio.run(ingest_all(base_url=args.llm_url, force=args.force, concurrency=args.concurrency))
+        stats = asyncio.run(ingest_all(model=args.model, force=args.force, concurrency=args.concurrency))
         print(f"Ingested {stats['edus']} EDUs from {stats['sessions']} sessions.")
 
     elif args.command == "search":
@@ -114,7 +115,8 @@ def main():
                 if session:
                     turns = len(session.turns)
                     words = sum(len(t.text.split()) for t in session.turns)
-            rows.append((date, project, sid[:8], turns, words, edu_count))
+            partial = "yes" if info.get("partial") else ""
+            rows.append((date, project, sid[:8], turns, words, edu_count, partial))
 
         sort_key = {"date": 0, "edus": 5, "words": 4}[args.sort]
         rows.sort(key=lambda r: r[sort_key], reverse=(args.sort != "date"))
@@ -128,14 +130,16 @@ def main():
         table.add_column("Turns", justify="right")
         table.add_column("Words", justify="right")
         table.add_column("EDUs", justify="right", style="yellow")
-        for date, project, sid, turns, words, edus in rows:
-            table.add_row(date, project, sid, str(turns), f"{words:,}", str(edus))
+        table.add_column("Partial", style="red")
+        for date, project, sid, turns, words, edus, partial in rows:
+            table.add_row(date, project, sid, str(turns), f"{words:,}", str(edus), partial)
         table.add_section()
         table.add_row(
             "Total", "", "",
             str(sum(r[3] for r in rows)),
             f"{sum(r[4] for r in rows):,}",
             str(sum(r[5] for r in rows)),
+            "",
             style="bold",
         )
         Console().print(table)
@@ -169,13 +173,15 @@ def main():
         state = load_ingestion_state()
         store = MemoryStore()
 
-        if not args.all and not args.session and not args.project:
-            print("Specify --all, --session <id>, or --project <name>")
+        if not args.all and not args.session and not args.project and not args.partial:
+            print("Specify --all, --session <id>, --project <name>, or --partial")
             sys.exit(1)
 
         # Find matching session IDs
         if args.all:
             targets = list(state.keys())
+        elif args.partial:
+            targets = [sid for sid, info in state.items() if info.get("partial")]
         elif args.project:
             targets = [sid for sid, info in state.items() if info.get("project") == args.project]
         else:

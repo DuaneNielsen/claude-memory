@@ -6,8 +6,8 @@ DATA_DIR = Path.home() / ".local" / "share" / "claude-memory"
 CHROMADB_DIR = DATA_DIR / "chromadb"
 INGESTION_STATE_FILE = DATA_DIR / "ingested_sessions.json"
 
-# LLM endpoint (OpenAI-compatible, llama-server)
-LLM_BASE_URL = "http://localhost:34315"
+# Claude model for EDU extraction
+DEFAULT_MODEL = "haiku"
 
 # Embedding model
 EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5"
