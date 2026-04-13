@@ -7,5 +7,13 @@
     "email": "duane.nielsen.rocks@gmail.com"
   },
   "repository": "https://github.com/DuaneNielsen/claude-memory",
-  "license": "MIT"
+  "license": "MIT",
+  "mcpServers": {
+    "claude-memory": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/.venv/bin/python",
+      "args": ["-m", "claude_memory"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    }
+  }
 }

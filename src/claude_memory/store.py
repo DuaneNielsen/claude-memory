@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 
 import chromadb
 from sentence_transformers import SentenceTransformer
@@ -10,6 +11,30 @@ from .config import CHROMADB_DIR, COLLECTION_NAME, EMBEDDING_MODEL
 from .extractor import EDU
 
 log = logging.getLogger(__name__)
+
+
+def _retry_on_lock(fn, *args, attempts: int = 5, base_delay: float = 0.05, **kwargs):
+    """Retry a ChromaDB call on SQLite 'database is locked' errors.
+
+    Concurrent reads from the MCP server and writes from the ingest subprocess
+    can briefly contend on the underlying SQLite file. WAL mode makes this rare,
+    but we still retry with exponential backoff to avoid surfacing transient
+    lock errors to the caller.
+    """
+    delay = base_delay
+    for i in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            msg = str(e).lower()
+            if "database is locked" in msg or "database table is locked" in msg:
+                if i == attempts - 1:
+                    raise
+                log.debug("ChromaDB locked, retrying in %.3fs (attempt %d)", delay, i + 1)
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
 
 
 class MemoryStore:
@@ -52,7 +77,8 @@ class MemoryStore:
         texts = [e.text for e in edus]
         embeddings = self.embed(texts)
 
-        self.collection.add(
+        _retry_on_lock(
+            self.collection.add,
             ids=[e.edu_id for e in edus],
             documents=texts,
             embeddings=embeddings,
@@ -81,22 +107,24 @@ class MemoryStore:
         }
         if where:
             kwargs["where"] = where
-        return self.collection.query(**kwargs)
+        return _retry_on_lock(self.collection.query, **kwargs)
 
     def delete_session(self, session_id: str) -> int:
         """Delete all EDUs for a session. Returns count deleted."""
-        results = self.collection.get(
+        results = _retry_on_lock(
+            self.collection.get,
             where={"session_id": session_id},
             include=[],
         )
         ids = results["ids"]
         if ids:
-            self.collection.delete(ids=ids)
+            _retry_on_lock(self.collection.delete, ids=ids)
         return len(ids)
 
     def get_session_edus(self, session_id: str) -> list[dict]:
         """Retrieve all stored EDUs for a session. Returns list of {text, metadata}."""
-        results = self.collection.get(
+        results = _retry_on_lock(
+            self.collection.get,
             where={"session_id": session_id},
             include=["documents", "metadatas"],
         )
@@ -106,4 +134,4 @@ class MemoryStore:
         return edus
 
     def count(self) -> int:
-        return self.collection.count()
+        return _retry_on_lock(self.collection.count)
