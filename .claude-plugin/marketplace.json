@@ -1,0 +1,21 @@
+{
+  "name": "claude-memory",
+  "owner": {
+    "name": "Duane Nielsen",
+    "url": "https://github.com/DuaneNielsen"
+  },
+  "plugins": [
+    {
+      "name": "claude-memory",
+      "description": "Conversation memory for Claude Code — extracts atomic facts from past sessions and exposes semantic search via MCP",
+      "version": "0.1.0",
+      "author": {
+        "name": "Duane Nielsen",
+        "url": "https://github.com/DuaneNielsen"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/DuaneNielsen/claude-memory"
+    }
+  ]
+}

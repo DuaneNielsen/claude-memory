@@ -13,21 +13,12 @@ Resumed sessions are handled incrementally — existing EDUs are loaded as conte
 
 ## Install
 
-### As a Claude Code plugin (recommended)
-
 ```bash
-claude --plugin-dir /path/to/claude-memory
+claude plugin marketplace add DuaneNielsen/claude-memory
+claude plugin install claude-memory
 ```
 
-The plugin auto-creates a `.venv` and installs dependencies on first session start via `uv sync`. The MCP server is registered automatically.
-
-### Manual
-
-```bash
-cd claude-memory
-uv sync
-claude mcp add claude-memory -- /path/to/claude-memory/.venv/bin/python -m claude_memory
-```
+The plugin auto-creates a `.venv` and installs dependencies on first session start via `uv sync`. The MCP server and hooks are registered automatically.
 
 Requires `claude` CLI to be installed and authenticated (Claude Code). EDU extraction uses the Claude API via the CLI — no local LLM needed.
 
