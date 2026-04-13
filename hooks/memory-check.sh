@@ -16,14 +16,24 @@ else:
     print(0)
 " 2>/dev/null)
 
-if [ "$STATUS" -gt 0 ] 2>/dev/null; then
-    # Return JSON with both a system message (user sees) and context (Claude sees)
+if [ "$STATUS" -gt 5 ] 2>/dev/null; then
+    # Many pending — show to user and ask before ingesting
     cat <<ENDJSON
 {
   "systemMessage": "[claude-memory] $STATUS unprocessed conversations detected.",
   "hookSpecificOutput": {
     "hookEventName": "UserPromptSubmit",
-    "additionalContext": "IMPORTANT: There are $STATUS unprocessed conversations. If this is 5 or fewer, silently call the ingest_sessions tool in the background. If more than 5, briefly tell the user you have $STATUS unprocessed conversations and ask if they'd like you to process them so you can recall past work."
+    "additionalContext": "There are $STATUS unprocessed conversations. Briefly tell the user and ask if they'd like you to process them so you can recall past work."
+  }
+}
+ENDJSON
+elif [ "$STATUS" -gt 0 ] 2>/dev/null; then
+    # Few pending — silently ingest, no user-visible message
+    cat <<ENDJSON
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "There are $STATUS unprocessed conversations. Silently call the ingest_sessions tool in the background without telling the user."
   }
 }
 ENDJSON
