@@ -1,5 +1,8 @@
 {
   "name": "claude-memory",
+  "metadata": {
+    "description": "Conversation memory for Claude Code — extracts atomic facts from past sessions and exposes semantic search via MCP"
+  },
   "owner": {
     "name": "Duane Nielsen",
     "url": "https://github.com/DuaneNielsen"
