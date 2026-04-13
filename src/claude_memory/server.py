@@ -25,13 +25,31 @@ def get_store():
 async def list_tools() -> list[Tool]:
     return [
         Tool(
+            name="memory_status",
+            description=(
+                "Check conversation memory status — how many sessions are ingested vs pending. "
+                "IMPORTANT: Call this at the START of every new conversation. "
+                "This system extracts discrete facts from past conversations so they can be searched later. "
+                "If a small number of sessions are pending (≤5), silently ingest them in the background "
+                "using the ingest_sessions tool without telling the user. "
+                "If many sessions are pending (>5), tell the user and ask before ingesting — "
+                "explain that you have unprocessed conversations and would like to extract memories from them "
+                "so you can recall past work. Keep it brief and natural. "
+                "If nothing is pending, proceed normally."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
             name="search_conversation_memory",
             description=(
                 "Search past Claude Code conversations for relevant context. "
-                "IMPORTANT: Search this at the start of every new conversation to check for prior work "
-                "related to the user's first message. Also search when the user references past work, "
-                "asks about previous decisions, or when the task involves systems that may have been "
-                "configured or debugged before. The query is fast and a miss costs nothing."
+                "Search when the user references past work, asks about previous decisions, "
+                "or when the task involves systems that may have been configured or debugged before. "
+                "Also search proactively when context seems to be missing. "
+                "The query is fast and a miss costs nothing."
             ),
             inputSchema={
                 "type": "object",
@@ -53,14 +71,72 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="ingest_sessions",
+            description=(
+                "Process new or changed Claude Code conversations into searchable memory. "
+                "Extracts discrete facts from conversations and stores them for later recall. "
+                "For ≤5 pending conversations, call this silently in the background. "
+                "For more, ask the user first."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Claude model to use for extraction (default: sonnet)",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Re-ingest all sessions from scratch (default: false)",
+                        "default": False,
+                    },
+                },
+            },
+        ),
     ]
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    if name != "search_conversation_memory":
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    if name == "memory_status":
+        return await _handle_status()
+    elif name == "search_conversation_memory":
+        return await _handle_search(arguments)
+    elif name == "ingest_sessions":
+        return await _handle_ingest(arguments)
+    return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
+
+async def _handle_status() -> list[TextContent]:
+    from .ingest import get_pending_sessions, load_ingestion_state
+
+    store = get_store()
+    state = load_ingestion_state()
+    edu_count = store.count()
+    pending = get_pending_sessions()
+
+    lines = [
+        f"Memory store: {edu_count} facts extracted from {len(state)} conversations.",
+    ]
+
+    if pending:
+        new = sum(1 for _, otc in pending if otc == 0)
+        continued = len(pending) - new
+        parts = []
+        if new:
+            parts.append(f"{new} new")
+        if continued:
+            parts.append(f"{continued} updated")
+        lines.append(f"Pending: {len(pending)} conversations ({', '.join(parts)}) have not been processed yet.")
+        lines.append("Processing extracts searchable facts from past conversations so you can recall prior work.")
+    else:
+        lines.append("All conversations are up to date.")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def _handle_search(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     project = arguments.get("project")
     max_results = arguments.get("max_results", 10)
@@ -70,7 +146,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if store.count() == 0:
         return [TextContent(
             type="text",
-            text="Memory store is empty. Run `claude-memory ingest` first.",
+            text="Memory store is empty. Use the ingest_sessions tool to process conversations first.",
         )]
 
     from .query import search
@@ -85,6 +161,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         lines.append(f"{i}. [{r.project}, {date}] {r.text}")
         lines.append(f"   (similarity={r.similarity:.3f}, recency={r.recency_weight:.3f}, score={r.score:.3f})")
         lines.append("")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def _handle_ingest(arguments: dict) -> list[TextContent]:
+    import asyncio as _asyncio
+    from .ingest import ingest_all
+
+    model = arguments.get("model")
+    force = arguments.get("force", False)
+
+    try:
+        stats = await ingest_all(model=model, force=force)
+    except Exception as e:
+        return [TextContent(type="text", text=f"Ingestion failed: {e}")]
+
+    lines = [f"Extracted {stats['edus']} facts from {stats['sessions']} conversations."]
+    if stats.get("failed"):
+        lines.append(f"{stats['failed']} sessions failed.")
+    if stats.get("elapsed"):
+        lines.append(f"Took {stats['elapsed']:.0f}s.")
 
     return [TextContent(type="text", text="\n".join(lines))]
 
