@@ -1,11 +1,11 @@
 # claude-memory
 
-Local conversation memory for Claude Code. Parses JSONL session files, extracts atomic facts (EDUs) via a local LLM, embeds them in ChromaDB, and exposes semantic search through an MCP server.
+Local conversation memory for Claude Code. Parses JSONL session files, extracts atomic facts (EDUs) via the Claude API, embeds them in ChromaDB, and exposes semantic search through an MCP server.
 
 ## How it works
 
 1. **Parse** — reads Claude Code session files from `~/.claude/projects/`
-2. **Extract** — sends conversation turns to a local LLM (OpenAI-compatible API) which decomposes them into Elementary Discourse Units (EDUs) — self-contained atomic facts
+2. **Extract** — sends conversation turns to the Claude API (via `claude` CLI) which decomposes them into Elementary Discourse Units (EDUs) — self-contained atomic facts
 3. **Embed** — encodes EDUs with `nomic-ai/nomic-embed-text-v1.5` (768d) and stores them in ChromaDB with cosine similarity
 4. **Search** — recency-weighted retrieval: `score = similarity * e^(-0.007 * days_ago)`
 
@@ -13,8 +13,20 @@ Resumed sessions are handled incrementally — existing EDUs are loaded as conte
 
 ## Install
 
+### As a Claude Code plugin (recommended)
+
 ```bash
-uv pip install -e .
+claude --plugin-dir /path/to/claude-memory
+```
+
+The plugin auto-creates a `.venv` and installs dependencies on first session start via `uv sync`. The MCP server is registered automatically.
+
+### Manual
+
+```bash
+cd claude-memory
+uv sync
+claude mcp add claude-memory -- /path/to/claude-memory/.venv/bin/python -m claude_memory
 ```
 
 Requires `claude` CLI to be installed and authenticated (Claude Code). EDU extraction uses the Claude API via the CLI — no local LLM needed.
@@ -28,8 +40,8 @@ claude-memory ingest
 # Re-ingest everything from scratch
 claude-memory ingest --force
 
-# Use a specific model (default: haiku)
-claude-memory ingest --model sonnet
+# Use a specific model (default: sonnet)
+claude-memory ingest --model opus
 
 # Tune concurrency
 claude-memory ingest --concurrency 4
@@ -63,27 +75,11 @@ claude-memory serve
 
 ## MCP server
 
-Register as a Claude Code MCP server:
+When installed as a plugin, the MCP server starts automatically. It exposes a `search_conversation_memory` tool that Claude Code can call to look up prior work.
 
-```bash
-claude mcp add claude-memory -- /path/to/claude-memory/.venv/bin/python -m claude_memory
-```
+## References
 
-Or add to `~/.claude/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "claude-memory": {
-      "type": "stdio",
-      "command": "/path/to/claude-memory/.venv/bin/python",
-      "args": ["-m", "claude_memory"]
-    }
-  }
-}
-```
-
-Exposes a `search_conversation_memory` tool that Claude Code can call to look up prior work.
+The EDU extraction approach is based on **EMem** ("A Simple Yet Strong Baseline for Long-Term Conversational Memory", [arXiv:2511.17208](https://arxiv.org/abs/2511.17208)), which decomposes conversations into atomic Elementary Discourse Units and retrieves them via dense similarity with recency weighting — achieving 0.780 on LoCoMo using only 738 tokens of context vs 23,653 for full-context baselines.
 
 ## Data storage
 
