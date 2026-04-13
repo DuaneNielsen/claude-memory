@@ -15,7 +15,7 @@ Resumed sessions are handled incrementally — existing EDUs are loaded as conte
 
 ```bash
 claude plugin marketplace add DuaneNielsen/claude-memory
-claude plugin install claude-memory
+claude plugin install claude-memory@duane-claude-plugins
 ```
 
 The plugin auto-creates a `.venv` and installs dependencies on first session start via `uv sync`. The MCP server and hooks are registered automatically.

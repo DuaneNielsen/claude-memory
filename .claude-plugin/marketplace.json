@@ -1,7 +1,7 @@
 {
-  "name": "claude-memory",
+  "name": "duane-claude-plugins",
   "metadata": {
-    "description": "Conversation memory for Claude Code — extracts atomic facts from past sessions and exposes semantic search via MCP"
+    "description": "Claude Code plugins by Duane Nielsen"
   },
   "owner": {
     "name": "Duane Nielsen",
