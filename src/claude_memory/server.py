@@ -167,8 +167,18 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
 
 async def _handle_ingest(arguments: dict) -> list[TextContent]:
     import subprocess
-    import sys
     from pathlib import Path
+
+    # Check if ingestion is already running
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude_memory.cli ingest"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return [TextContent(type="text", text="Ingestion is already running in the background. No action needed.")]
+    except Exception:
+        pass
 
     model = arguments.get("model")
     force = arguments.get("force", False)

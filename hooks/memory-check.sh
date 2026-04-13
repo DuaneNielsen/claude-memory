@@ -5,6 +5,11 @@ if [ -f /tmp/claude-memory-prompted ]; then
 fi
 touch /tmp/claude-memory-prompted
 
+# Check if ingestion is already running
+if pgrep -f "claude_memory.cli ingest" > /dev/null 2>&1; then
+    exit 0
+fi
+
 # Run the actual status check
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 STATUS=$("$PLUGIN_ROOT/.venv/bin/python" -c "
