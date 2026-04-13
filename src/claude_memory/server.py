@@ -166,22 +166,40 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_ingest(arguments: dict) -> list[TextContent]:
-    import asyncio as _asyncio
-    from .ingest import ingest_all
+    import subprocess
+    import sys
+    from pathlib import Path
 
     model = arguments.get("model")
     force = arguments.get("force", False)
 
-    try:
-        stats = await ingest_all(model=model, force=force)
-    except Exception as e:
-        return [TextContent(type="text", text=f"Ingestion failed: {e}")]
+    # Find the python executable in our venv
+    venv_python = str(Path(__file__).parent.parent.parent / ".venv" / "bin" / "python")
 
-    lines = [f"Extracted {stats['edus']} facts from {stats['sessions']} conversations."]
-    if stats.get("failed"):
-        lines.append(f"{stats['failed']} sessions failed.")
-    if stats.get("elapsed"):
-        lines.append(f"Took {stats['elapsed']:.0f}s.")
+    cmd = [venv_python, "-m", "claude_memory.cli", "ingest"]
+    if model:
+        cmd.extend(["--model", model])
+    if force:
+        cmd.append("--force")
+
+    try:
+        # Launch as detached background process
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        return [TextContent(type="text", text=f"Failed to start ingestion: {e}")]
+
+    from .ingest import get_pending_sessions
+    pending = get_pending_sessions()
+    count = len(pending)
+
+    lines = [f"Ingestion started in the background for {count} conversations."]
+    lines.append("New memories will become searchable as they are processed.")
+    lines.append("The user can continue working — this won't block anything.")
 
     return [TextContent(type="text", text="\n".join(lines))]
 
