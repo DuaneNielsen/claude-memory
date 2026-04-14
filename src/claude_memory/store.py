@@ -7,7 +7,7 @@ import time
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from .config import CHROMADB_DIR, COLLECTION_NAME, EMBEDDING_MODEL
+from .config import CHROMA_HOST, CHROMA_PORT, COLLECTION_NAME, EMBEDDING_MODEL
 from .extractor import EDU
 
 log = logging.getLogger(__name__)
@@ -40,10 +40,12 @@ def _retry_on_lock(fn, *args, attempts: int = 5, base_delay: float = 0.05, **kwa
 class MemoryStore:
     def __init__(
         self,
-        chromadb_dir: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
         embedding_model: str | None = None,
     ):
-        self._chromadb_dir = chromadb_dir or str(CHROMADB_DIR)
+        self._host = host or CHROMA_HOST
+        self._port = port or CHROMA_PORT
         self._embedding_model_name = embedding_model or EMBEDDING_MODEL
         self._model: SentenceTransformer | None = None
         self._client: chromadb.ClientAPI | None = None
@@ -52,13 +54,13 @@ class MemoryStore:
     @property
     def model(self) -> SentenceTransformer:
         if self._model is None:
-            self._model = SentenceTransformer(self._embedding_model_name)
+            self._model = SentenceTransformer(self._embedding_model_name, device="cpu")
         return self._model
 
     @property
     def collection(self) -> chromadb.Collection:
         if self._collection is None:
-            self._client = chromadb.PersistentClient(path=self._chromadb_dir)
+            self._client = chromadb.HttpClient(host=self._host, port=self._port)
             self._collection = self._client.get_or_create_collection(
                 name=COLLECTION_NAME,
                 metadata={"hnsw:space": "cosine"},

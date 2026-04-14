@@ -23,3 +23,9 @@ DEFAULT_MAX_RESULTS = 10
 
 # ChromaDB collection name
 COLLECTION_NAME = "edus"
+
+# ChromaDB server (client-server mode — required for concurrent access
+# from the MCP server and ingest CLI; PersistentClient segfaults when
+# two processes open the same DB)
+CHROMA_HOST = "127.0.0.1"
+CHROMA_PORT = 8765
