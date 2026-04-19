@@ -20,6 +20,20 @@ claude plugin install claude-memory@duane-claude-plugins
 
 The plugin auto-creates a `.venv` and installs dependencies on first session start via `uv sync`. The MCP server and hooks are registered automatically.
 
+To allow the plugin's MCP tools to run without permission prompts, add these to your `~/.claude/settings.json` allow list:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_claude-memory_claude-memory__ingest_sessions",
+      "mcp__plugin_claude-memory_claude-memory__search_conversation_memory",
+      "mcp__plugin_claude-memory_claude-memory__memory_status"
+    ]
+  }
+}
+```
+
 Requires `claude` CLI to be installed and authenticated (Claude Code). EDU extraction uses the Claude API via the CLI — no local LLM needed.
 
 ## CLI
