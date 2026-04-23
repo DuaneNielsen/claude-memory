@@ -118,6 +118,18 @@ def _clean_project_name(raw: str) -> str:
     return raw
 
 
+def project_from_cwd(cwd: Path | str | None = None) -> str:
+    """Derive the project name used by ingestion from a filesystem path.
+
+    Mirrors the encoding Claude Code uses for session storage directories:
+    /home/duane/projects/claude-memory -> -home-duane-projects-claude-memory
+    -> projects-claude-memory (after _clean_project_name).
+    """
+    path = Path(cwd) if cwd else Path.cwd()
+    encoded = "-" + str(path.resolve()).lstrip("/").replace("/", "-")
+    return _clean_project_name(encoded)
+
+
 def discover_sessions(projects_dir: Path | None = None) -> list[Path]:
     """Find all JSONL session files."""
     base = projects_dir or CLAUDE_PROJECTS_DIR

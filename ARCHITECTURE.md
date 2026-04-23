@@ -226,3 +226,43 @@ claude-memory/
 3. **Recency decay, not recency cutoff** — old facts should still be findable, just mildly deprioritized
 4. **Maximally inclusive retrieval** — false positives are cheap (LLM ignores irrelevant context), false negatives are expensive (lost information)
 5. **Lightweight wins** — EMem without graph nearly matches EMem with PageRank. Skip the graph unless retrieval quality proves insufficient
+
+---
+
+## North Star: Ambient Associative Memory (future direction)
+
+The current design is **query-based retrieval** — something asks, memory answers.
+Human memory doesn't work that way. Memories *surface* associatively, cued by
+current context, without explicit querying. You see Alice and memories of Alice
+appear — you don't formulate a query.
+
+The long-term direction for claude-memory is **ambient associative memory**:
+
+- **Three layers**:
+  1. *Ambient* — always-on monitor, surfaces memories as events when context cues hit
+  2. *Associative* — classifier fires on explicit references ("that thing we did")
+  3. *Explicit* — deliberate subagent query (current design — stays as fallback)
+
+- **Cue-based, not query-based** — extract entities/topics/intents from recent turns,
+  use those as implicit queries. The conversation *is* the query.
+
+- **Salience filtering** — only high-confidence matches surface, rest stay dormant.
+  Salience = similarity × recency × importance × novelty-vs-current-context.
+
+- **Event-driven surfacing** — memories appear *unprompted* when triggered,
+  injected as annotated events ("memory: you configured X at port Y last week").
+
+- **Novelty / dedup tracking** — never resurface memories already in context this
+  session. Humans don't re-remind themselves of things they just thought about.
+
+**Why not build this now**: walking the query-based path first provides the
+benchmark-grounded intuitions needed to design the surfacing layer. Threshold,
+salience formula, and cue extraction all need empirical tuning that only makes
+sense once the retrieval itself is measured and tuned. Ambient memory built on
+a weak retrieval substrate just surfaces noise more aggressively.
+
+**Convergence target**: the ambient layer becomes the primary interaction mode,
+the explicit subagent / MCP tool becomes a fallback for complex multi-hop queries
+the ambient layer can't resolve. Human memory works the same way — you mostly
+don't query, but you *can* when you need to.
+

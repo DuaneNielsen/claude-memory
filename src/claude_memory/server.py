@@ -72,6 +72,37 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="recall_memory",
+            description=(
+                "Deep recall: given search terms and a question, an Opus subagent reads past "
+                "trajectories (with neighboring context) and synthesizes an answer. Slower and "
+                "more expensive than search_conversation_memory — use when you need an "
+                "explanatory answer rather than a list of facts, or when the question spans "
+                "multiple conversations. Search terms should be topic keywords (e.g. 'pipewire', "
+                "'trajectory'); the question is the thing you actually need answered. "
+                "Returns the subagent's prose answer plus diagnostic counts."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search_terms": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Topic keywords likely to be in past trajectories (e.g. ['pipewire','audio']).",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The question to answer using recovered memory.",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project scope. If omitted, derived from the current working directory.",
+                    },
+                },
+                "required": ["search_terms", "question"],
+            },
+        ),
+        Tool(
             name="ingest_sessions",
             description=(
                 "Process new or changed Claude Code conversations into searchable memory. "
@@ -103,9 +134,33 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return await _handle_status()
     elif name == "search_conversation_memory":
         return await _handle_search(arguments)
+    elif name == "recall_memory":
+        return await _handle_recall(arguments)
     elif name == "ingest_sessions":
         return await _handle_ingest(arguments)
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+
+async def _handle_recall(arguments: dict) -> list[TextContent]:
+    from .parser import project_from_cwd
+    from .retrieval import recall_memory
+
+    search_terms = arguments.get("search_terms", []) or []
+    question = arguments.get("question", "")
+    project = arguments.get("project") or project_from_cwd()
+
+    try:
+        result = await recall_memory(search_terms, question, project=project)
+    except Exception as e:
+        return [TextContent(type="text", text=f"recall_memory failed: {e}")]
+
+    diag = (
+        f"\n\n---\n"
+        f"(recall diagnostics: {result.hit_count} trajectory hits, "
+        f"{result.block_count} blocks stitched, {result.blocks_in_wall} included, "
+        f"{result.wall_chars} chars of context)"
+    )
+    return [TextContent(type="text", text=result.answer + diag)]
 
 
 async def _handle_status() -> list[TextContent]:

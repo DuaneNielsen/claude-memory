@@ -90,6 +90,9 @@ class MemoryStore:
                 "timestamp": e.timestamp.isoformat(),
                 "speakers": ",".join(e.speakers),
                 "source_turns": json.dumps(e.source_turn_ids),
+                "tag": e.tag.value,
+                "trajectory_id": e.trajectory_id or "",
+                "trajectory_index": e.trajectory_index,
             } for e in edus],
         )
         return len(edus)
@@ -133,6 +136,24 @@ class MemoryStore:
         edus = []
         for doc, meta in zip(results["documents"], results["metadatas"]):
             edus.append({"text": doc, **meta})
+        return edus
+
+    def get_edus_by_trajectories(self, trajectory_ids: list[str]) -> list[dict]:
+        """Fetch all EDUs belonging to any of the given trajectories, sorted by
+        trajectory_id then trajectory_index. Returns list of {id, text, ...metadata}."""
+        if not trajectory_ids:
+            return []
+        where = {"trajectory_id": {"$in": trajectory_ids}} if len(trajectory_ids) > 1 \
+            else {"trajectory_id": trajectory_ids[0]}
+        results = _retry_on_lock(
+            self.collection.get,
+            where=where,
+            include=["documents", "metadatas"],
+        )
+        edus = []
+        for edu_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+            edus.append({"id": edu_id, "text": doc, **meta})
+        edus.sort(key=lambda e: (e.get("trajectory_id", ""), e.get("trajectory_index", 0)))
         return edus
 
     def count(self) -> int:
