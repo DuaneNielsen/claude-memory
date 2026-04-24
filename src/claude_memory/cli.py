@@ -22,7 +22,15 @@ def main():
     # search
     search_p = sub.add_parser("search", help="Search conversation memory")
     search_p.add_argument("query", help="Search query")
-    search_p.add_argument("--project", help="Filter to project")
+    search_p.add_argument(
+        "--project",
+        help="Project name used as a soft ranking boost (default: derived from cwd). "
+             "Cross-project hits still surface.",
+    )
+    search_p.add_argument(
+        "--strict-project",
+        help="Hard-filter results to this project only (overrides boost behavior).",
+    )
     search_p.add_argument("--max-results", type=int, default=10)
 
     # stats
@@ -54,7 +62,15 @@ def main():
     recall_p = sub.add_parser("recall", help="Deep-recall via Opus subagent")
     recall_p.add_argument("question", help="The question to answer from memory")
     recall_p.add_argument("--terms", nargs="*", default=[], help="Keyword search terms")
-    recall_p.add_argument("--project", help="Project scope (default: derived from cwd)")
+    recall_p.add_argument(
+        "--project",
+        help="Project name used as a soft ranking boost (default: derived from cwd). "
+             "Cross-project hits still surface.",
+    )
+    recall_p.add_argument(
+        "--strict-project",
+        help="Hard-filter recall to this project only (overrides boost behavior).",
+    )
     recall_p.add_argument("--model", default="opus", help="Subagent model (default: opus)")
 
     # serve (MCP server)
@@ -94,17 +110,29 @@ def main():
             print(f"{stats['pending']} session(s) left pending for retry — re-run `claude-memory ingest` to resume.")
 
     elif args.command == "search":
+        from .parser import project_from_cwd
         from .query import search
         from .store import MemoryStore
         store = MemoryStore()
-        results = search(store, args.query, project=args.project, max_results=args.max_results)
+        current_project = args.project or project_from_cwd()
+        results = search(
+            store,
+            args.query,
+            current_project=current_project,
+            strict_project=args.strict_project,
+            max_results=args.max_results,
+        )
         if not results:
             print("No results found.")
         else:
             for i, r in enumerate(results, 1):
                 date = r.timestamp.strftime("%Y-%m-%d")
-                print(f"{i}. [{r.project}, {date}] {r.text}")
-                print(f"   score={r.score:.3f} (sim={r.similarity:.3f}, recency={r.recency_weight:.3f})")
+                boost_marker = " *boost*" if r.project_boost > 1.0 else ""
+                print(f"{i}. [{r.project}{boost_marker}, {date}] {r.text}")
+                print(
+                    f"   score={r.score:.3f} (sim={r.similarity:.3f}, "
+                    f"recency={r.recency_weight:.3f}, boost={r.project_boost:.2f})"
+                )
                 print()
 
     elif args.command == "stats":
@@ -269,11 +297,12 @@ def main():
     elif args.command == "recall":
         from .parser import project_from_cwd
         from .retrieval import recall_memory
-        project = args.project or project_from_cwd()
+        current_project = args.project or project_from_cwd()
         result = asyncio.run(recall_memory(
             search_terms=args.terms,
             question=args.question,
-            project=project,
+            current_project=current_project,
+            strict_project=args.strict_project,
             model=args.model,
         ))
         print(result.answer)

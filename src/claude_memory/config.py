@@ -44,6 +44,12 @@ RETRIEVAL_CANDIDATES = 30
 RECENCY_DECAY_ALPHA = 0.007  # per day
 DEFAULT_MAX_RESULTS = 10
 
+# Cross-project recall: the current project is a *boost signal* in ranking,
+# not a hard filter. Hits whose project matches the caller's current project
+# get their score multiplied by this factor; cross-project hits still surface.
+# Use strict_project=... at the API/CLI layer when isolation is actually wanted.
+PROJECT_BOOST_FACTOR = 1.5
+
 # ChromaDB collection name
 COLLECTION_NAME = "edus"
 

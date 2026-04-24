@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import NEIGHBOR_WINDOW
+from .config import NEIGHBOR_WINDOW, PROJECT_BOOST_FACTOR
 from .store import MemoryStore
 from .trajectories import Trajectory, TrajectoryStore
 
@@ -66,31 +66,61 @@ class StitchedBlock:
 def _find_hit_trajectory_ids(
     search_terms: list[str],
     question: str,
-    project: str,
+    current_project: str | None,
+    strict_project: str | None,
     traj_store: TrajectoryStore,
     mem_store: MemoryStore,
     vector_n: int = 30,
+    boost_factor: float = PROJECT_BOOST_FACTOR,
 ) -> list[str]:
-    """Return the union of keyword-hit and vector-hit trajectory_ids."""
-    hit_ids: set[str] = set()
+    """Return trajectory_ids from keyword + vector hits, ordered by boosted score.
+
+    - `current_project`: trajectories in this project get score * boost_factor.
+    - `strict_project`: hard filter — only consider trajectories in this project.
+      When set, the boost is effectively a no-op (everything is the same project).
+
+    Default (both None): global search, no boost. When `current_project` is set
+    without `strict_project`, cross-project hits are returned but ranked below
+    same-project hits of comparable similarity.
+    """
+    scores: dict[str, float] = {}
+
+    def _bump(tid: str, score: float):
+        if tid:
+            scores[tid] = max(scores.get(tid, 0.0), score)
 
     if search_terms:
         normalized = [t.strip().lower() for t in search_terms if t and t.strip()]
         if normalized:
-            hit_ids.update(traj_store.search_by_keywords(project, normalized))
+            if strict_project:
+                for tid in traj_store.search_by_keywords(strict_project, normalized):
+                    _bump(tid, 1.0)  # keyword hit baseline
+            else:
+                for tid, project in traj_store.search_by_keywords_global(normalized):
+                    boost = boost_factor if project == current_project else 1.0
+                    _bump(tid, 1.0 * boost)
 
     if question and question.strip():
-        where = {"$and": [
-            {"project": {"$eq": project}},
-            {"trajectory_id": {"$ne": ""}},
-        ]}
+        if strict_project:
+            where = {"$and": [
+                {"project": {"$eq": strict_project}},
+                {"trajectory_id": {"$ne": ""}},
+            ]}
+        else:
+            where = {"trajectory_id": {"$ne": ""}}
         results = mem_store.query(question, n_results=vector_n, where=where)
-        for meta in results.get("metadatas", [[]])[0]:
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0]
+        for i, meta in enumerate(metas):
             tid = meta.get("trajectory_id") or ""
-            if tid:
-                hit_ids.add(tid)
+            if not tid:
+                continue
+            similarity = 1.0 - (dists[i] / 2.0)
+            project = meta.get("project") or ""
+            boost = boost_factor if (current_project and project == current_project) else 1.0
+            _bump(tid, similarity * boost)
 
-    return sorted(hit_ids)
+    return [tid for tid, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
 
 
 def _group_trajectories_by_session(trajectories: list[Trajectory]) -> dict[str, list[Trajectory]]:
@@ -352,23 +382,34 @@ class RecallResult:
 async def recall_memory(
     search_terms: list[str],
     question: str,
-    project: str,
+    current_project: str | None = None,
+    strict_project: str | None = None,
     traj_store: TrajectoryStore | None = None,
     mem_store: MemoryStore | None = None,
     pad: int = NEIGHBOR_WINDOW,
     budget_tokens: int = SUBAGENT_TOKEN_BUDGET,
     model: str = SUBAGENT_MODEL,
 ) -> RecallResult:
-    """End-to-end deep-recall. Returns the subagent's synthesized answer + diagnostics."""
+    """End-to-end deep-recall. Returns the subagent's synthesized answer + diagnostics.
+
+    Recall is global by default. `current_project` is a soft boost — trajectories
+    in that project rank higher than cross-project hits of comparable similarity.
+    `strict_project` is a hard filter — restricts retrieval to that project only.
+    """
     traj_store = traj_store or TrajectoryStore()
     mem_store = mem_store or MemoryStore()
 
     hit_ids = _find_hit_trajectory_ids(
-        search_terms, question, project, traj_store, mem_store,
+        search_terms, question,
+        current_project=current_project,
+        strict_project=strict_project,
+        traj_store=traj_store,
+        mem_store=mem_store,
     )
     if not hit_ids:
+        scope = f"project '{strict_project}'" if strict_project else "any project"
         return RecallResult(
-            answer="No memories matched the search terms or question for this project.",
+            answer=f"No memories matched the search terms or question across {scope}.",
             hit_count=0, block_count=0, blocks_in_wall=0, wall_chars=0,
         )
 

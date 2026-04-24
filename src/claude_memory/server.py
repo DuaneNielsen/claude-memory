@@ -49,7 +49,10 @@ async def list_tools() -> list[Tool]:
                 "Search when the user references past work, asks about previous decisions, "
                 "or when the task involves systems that may have been configured or debugged before. "
                 "Also search proactively when context seems to be missing. "
-                "The query is fast and a miss costs nothing."
+                "The query is fast and a miss costs nothing. "
+                "Search is global across projects by default; the current project is used as a "
+                "soft ranking boost. Pass `strict_project` only when you genuinely want to "
+                "exclude cross-project hits (rare — e.g. the user explicitly says 'only frigate stuff')."
             ),
             inputSchema={
                 "type": "object",
@@ -60,7 +63,18 @@ async def list_tools() -> list[Tool]:
                     },
                     "project": {
                         "type": "string",
-                        "description": "Optional: filter to a specific project name (e.g. 'primesignal', 'frigate')",
+                        "description": (
+                            "Optional: project name used as a soft RANKING BOOST — results from "
+                            "this project rank higher, but cross-project results still surface. "
+                            "If omitted, derived from the current working directory."
+                        ),
+                    },
+                    "strict_project": {
+                        "type": "string",
+                        "description": (
+                            "Optional HARD FILTER: restrict results to this project only. "
+                            "Use this only when project isolation is explicitly required."
+                        ),
                     },
                     "max_results": {
                         "type": "integer",
@@ -80,7 +94,9 @@ async def list_tools() -> list[Tool]:
                 "explanatory answer rather than a list of facts, or when the question spans "
                 "multiple conversations. Search terms should be topic keywords (e.g. 'pipewire', "
                 "'trajectory'); the question is the thing you actually need answered. "
-                "Returns the subagent's prose answer plus diagnostic counts."
+                "Recall is global across projects by default; the current project is used as a "
+                "soft ranking boost. Pass `strict_project` only when project isolation is "
+                "genuinely needed. Returns the subagent's prose answer plus diagnostic counts."
             ),
             inputSchema={
                 "type": "object",
@@ -96,7 +112,18 @@ async def list_tools() -> list[Tool]:
                     },
                     "project": {
                         "type": "string",
-                        "description": "Optional project scope. If omitted, derived from the current working directory.",
+                        "description": (
+                            "Optional: project name used as a soft RANKING BOOST. Results from "
+                            "this project rank higher, cross-project hits still surface. "
+                            "If omitted, derived from the current working directory."
+                        ),
+                    },
+                    "strict_project": {
+                        "type": "string",
+                        "description": (
+                            "Optional HARD FILTER: restrict recall to this project only. "
+                            "Use only when isolation is explicitly required."
+                        ),
                     },
                 },
                 "required": ["search_terms", "question"],
@@ -147,10 +174,16 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
 
     search_terms = arguments.get("search_terms", []) or []
     question = arguments.get("question", "")
-    project = arguments.get("project") or project_from_cwd()
+    current_project = arguments.get("project") or project_from_cwd()
+    strict_project = arguments.get("strict_project")
 
     try:
-        result = await recall_memory(search_terms, question, project=project)
+        result = await recall_memory(
+            search_terms,
+            question,
+            current_project=current_project,
+            strict_project=strict_project,
+        )
     except Exception as e:
         return [TextContent(type="text", text=f"recall_memory failed: {e}")]
 
@@ -192,8 +225,11 @@ async def _handle_status() -> list[TextContent]:
 
 
 async def _handle_search(arguments: dict) -> list[TextContent]:
+    from .parser import project_from_cwd
+
     query = arguments["query"]
-    project = arguments.get("project")
+    current_project = arguments.get("project") or project_from_cwd()
+    strict_project = arguments.get("strict_project")
     max_results = arguments.get("max_results", 10)
 
     store = get_store()
@@ -205,7 +241,13 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
         )]
 
     from .query import search
-    results = search(store, query, project=project, max_results=max_results)
+    results = search(
+        store,
+        query,
+        current_project=current_project,
+        strict_project=strict_project,
+        max_results=max_results,
+    )
 
     if not results:
         return [TextContent(type="text", text="No relevant memories found.")]

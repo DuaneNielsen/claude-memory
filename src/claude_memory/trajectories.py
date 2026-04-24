@@ -235,7 +235,8 @@ class TrajectoryStore:
         return {r[0]: r[1] for r in rows}
 
     def search_by_keywords(self, project: str, keywords: list[str]) -> list[str]:
-        """Return trajectory_ids whose keyword set intersects with the given keywords."""
+        """Return trajectory_ids whose keyword set intersects with the given keywords,
+        scoped to a single project (hard filter)."""
         if not keywords:
             return []
         placeholders = ",".join("?" * len(keywords))
@@ -247,6 +248,25 @@ class TrajectoryStore:
                 (project, *keywords),
             ).fetchall()
         return [r[0] for r in rows]
+
+    def search_by_keywords_global(self, keywords: list[str]) -> list[tuple[str, str]]:
+        """Cross-project keyword search. Returns list of (trajectory_id, project) tuples.
+
+        Project is returned alongside so the caller can apply a soft boost during
+        ranking without re-querying SQLite. Use this for global recall; use
+        `search_by_keywords(project, ...)` when project isolation is required.
+        """
+        if not keywords:
+            return []
+        placeholders = ",".join("?" * len(keywords))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT kw.trajectory_id, t.project FROM trajectory_keywords kw "
+                f"JOIN trajectories t ON kw.trajectory_id = t.id "
+                f"WHERE kw.keyword IN ({placeholders})",
+                tuple(keywords),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     def delete_session(self, session_id: str) -> int:
         with self._connect() as conn:
