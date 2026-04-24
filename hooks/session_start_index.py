@@ -45,10 +45,18 @@ def main() -> int:
         if not content.strip():
             return 0
 
-        # Prepend a stable heading so Claude recognizes this block consistently;
-        # the heading is byte-identical across runs so it doesn't break prompt caching.
+        # Prepend a stable, distinctively titled heading so Claude recognizes
+        # this block as a discrete corpus and not loose context. The heading
+        # is byte-identical across runs so it doesn't break prompt caching.
         wrapped = (
-            "Memory index (from past conversations in this project):\n\n"
+            f"# Conversation memory index — project `{project}`\n\n"
+            "This is an auto-generated digest of one-line summaries from past "
+            "Claude Code conversations in this project. For deeper queries — "
+            "full stitched excerpts, cross-project searches, or topics not "
+            "summarized below — dispatch the `recall_get_context` MCP tool "
+            "via an Agent/Task subagent (see its tool description for the "
+            "exact pattern).\n\n"
+            "---\n\n"
             + content
         )
 
