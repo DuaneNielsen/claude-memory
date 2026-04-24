@@ -27,7 +27,7 @@ To allow the plugin's MCP tools to run without permission prompts, add these to 
   "permissions": {
     "allow": [
       "mcp__plugin_claude-memory_claude-memory__ingest_sessions",
-      "mcp__plugin_claude-memory_claude-memory__search_conversation_memory",
+      "mcp__plugin_claude-memory_claude-memory__recall_get_context",
       "mcp__plugin_claude-memory_claude-memory__memory_status"
     ]
   }
@@ -80,7 +80,17 @@ claude-memory serve
 
 ## MCP server
 
-When installed as a plugin, the MCP server starts automatically. It exposes a `search_conversation_memory` tool that Claude Code can call to look up prior work.
+When installed as a plugin, the MCP server starts automatically and exposes:
+
+- `memory_status` — sanity check at session start; surfaces pending sessions.
+- `ingest_sessions` — process new/changed conversations into searchable memory.
+- `recall_get_context` — given search terms + a question, returns a stitched
+  wall-of-text of relevant past trajectories with neighboring context.
+
+**Dispatch convention for `recall_get_context`:** the wall can be tens of
+kilobytes. The main agent should dispatch the call into an `Agent`/`Task`
+subagent so the wall lives in the subagent's context, not yours, and the
+subagent returns synthesized prose.
 
 ## References
 

@@ -43,24 +43,28 @@ async def list_tools() -> list[Tool]:
             },
         ),
         # search_conversation_memory is intentionally hidden from list_tools
-        # as of 0.5.0 — recall_memory covers the same ground with stitched
-        # neighbor context and subagent synthesis. The handler below
-        # (_handle_search) and call_tool dispatch are kept so it can be
-        # re-enabled by adding a Tool() entry back here if recall proves too
-        # slow for quick lookups. Pruning the calling-agent's choice down to
-        # one memory tool also removes a routing decision it gets wrong.
+        # as of 0.5.0 — recall_get_context covers the same ground with stitched
+        # neighbor context. The handler below (_handle_search) and call_tool
+        # dispatch are kept so it can be re-enabled by adding a Tool() entry
+        # back here if needed. Pruning the calling-agent's choice down to one
+        # memory tool also removes a routing decision it gets wrong.
         Tool(
-            name="recall_memory",
+            name="recall_get_context",
             description=(
-                "Deep recall: given search terms and a question, an Opus subagent reads past "
-                "trajectories (with neighboring context) and synthesizes an answer. Slower and "
-                "more expensive than search_conversation_memory — use when you need an "
-                "explanatory answer rather than a list of facts, or when the question spans "
-                "multiple conversations. Search terms should be topic keywords (e.g. 'pipewire', "
-                "'trajectory'); the question is the thing you actually need answered. "
-                "Recall is global across projects by default; the current project is used as a "
-                "soft ranking boost. Pass `strict_project` only when project isolation is "
-                "genuinely needed. Returns the subagent's prose answer plus diagnostic counts."
+                "IMPORTANT: ALWAYS call this from inside an Agent/Task subagent, NEVER from "
+                "the main context. Returns memory excerpts as a wall-of-text (up to ~420kb of "
+                "stitched trajectories with neighboring context) — reading it directly will "
+                "bloat your context. Typical pattern from the main agent:\n"
+                "  Agent(prompt=\"use recall_get_context with search_terms=[...] and "
+                "question='...' to find relevant memory, then synthesize a concise answer\")\n"
+                "The subagent calls this tool, reads the wall, returns prose. The wall is "
+                "discarded with the subagent's context.\n\n"
+                "Search terms should be topic keywords (e.g. 'pipewire', 'trajectory'); the "
+                "question is the thing you actually need answered. Recall is global across "
+                "projects by default; the current project is used as a soft ranking boost. "
+                "Pass `strict_project` only when project isolation is genuinely needed. "
+                "Returns the wall + a one-line stats footer (hits, blocks, chars, retrieval "
+                "timings)."
             ),
             inputSchema={
                 "type": "object",
@@ -125,7 +129,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return await _handle_status()
     elif name == "search_conversation_memory":
         return await _handle_search(arguments)
-    elif name == "recall_memory":
+    elif name == "recall_get_context":
         return await _handle_recall(arguments)
     elif name == "ingest_sessions":
         return await _handle_ingest(arguments)
@@ -134,7 +138,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 async def _handle_recall(arguments: dict) -> list[TextContent]:
     from .parser import project_from_cwd
-    from .retrieval import recall_memory
+    from .retrieval import build_recall_wall
 
     search_terms = arguments.get("search_terms", []) or []
     question = arguments.get("question", "")
@@ -142,36 +146,43 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     strict_project = arguments.get("strict_project")
 
     try:
-        result = await recall_memory(
+        wall, ctx = await asyncio.to_thread(
+            build_recall_wall,
             search_terms,
             question,
             current_project=current_project,
             strict_project=strict_project,
         )
     except Exception as e:
-        return [TextContent(type="text", text=f"recall_memory failed: {e}")]
+        return [TextContent(type="text", text=f"recall_get_context failed: {e}")]
 
-    kw = result.find_hits_breakdown.get("keyword", 0.0)
-    vec = result.find_hits_breakdown.get("vector", 0.0)
-    sb = result.subagent_breakdown
-    boot = sb.get("system_init", 0.0)
-    api_req = max(0.0, sb.get("first_stream_event", 0.0) - sb.get("system_init", 0.0))
-    gen = max(0.0, sb.get("result_event", 0.0) - sb.get("first_stream_event", 0.0))
-    cleanup = max(0.0, sb.get("complete", 0.0) - sb.get("result_event", 0.0))
-    api_ttft = sb.get("api_ttft_ms", 0.0) / 1000.0
-    diag = (
+    if ctx.hit_count == 0:
+        scope = f"project '{strict_project}'" if strict_project else "any project"
+        return [TextContent(
+            type="text",
+            text=f"No memories matched the search terms or question across {scope}.",
+        )]
+
+    if not wall.strip():
+        return [TextContent(
+            type="text",
+            text=(
+                f"Hits were found ({ctx.hit_count}) but their EDUs could not be retrieved "
+                f"from the memory store."
+            ),
+        )]
+
+    kw = ctx.find_hits_breakdown.get("keyword", 0.0)
+    vec = ctx.find_hits_breakdown.get("vector", 0.0)
+    footer = (
         f"\n\n---\n"
-        f"(recall diagnostics: {result.hit_count} trajectory hits, "
-        f"{result.block_count} blocks stitched, {result.blocks_in_wall} included, "
-        f"{result.wall_chars} chars of context)\n"
-        f"(timing: total={result.t_total:.2f}s | "
-        f"find={result.t_find_hits:.2f}s [kw={kw:.2f}, vec={vec:.2f}] | "
-        f"gather={result.t_gather:.2f}s | render={result.t_render:.3f}s | "
-        f"subagent={result.t_subagent:.2f}s "
-        f"[boot={boot:.2f}, api_req={api_req:.2f} (api_ttft={api_ttft:.2f}), "
-        f"gen={gen:.2f}, cleanup={cleanup:.3f}])"
+        f"(recall stats: {ctx.hit_count} hits, {ctx.block_count} blocks stitched, "
+        f"{ctx.blocks_in_wall} in wall, {ctx.wall_chars} chars | "
+        f"timing: total={ctx.t_total:.2f}s, "
+        f"find={ctx.t_find_hits:.2f}s [kw={kw:.2f}, vec={vec:.2f}], "
+        f"gather={ctx.t_gather:.2f}s, render={ctx.t_render:.3f}s)"
     )
-    return [TextContent(type="text", text=result.answer + diag)]
+    return [TextContent(type="text", text=wall + footer)]
 
 
 async def _handle_status() -> list[TextContent]:

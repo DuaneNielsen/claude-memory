@@ -1,4 +1,4 @@
-"""Deep-recall retrieval pipeline: hit expansion, re-stitching, subagent synthesis.
+"""Recall retrieval pipeline: hit expansion, re-stitching, wall-of-text render.
 
 Flow:
   1. Find trajectory hits — keyword lookup (SQLite) + vector search on the question (ChromaDB)
@@ -6,20 +6,18 @@ Flow:
      (the tail of the prior trajectory, the head of the next, within the same session)
   3. Re-stitch overlapping windows into contiguous blocks
   4. Render as a markdown "wall of text" capped at a context budget
-  5. Call an Opus subagent with (question, wall-of-text) → synthesized answer
 
-The caller (MCP tool) just receives the synthesized answer — the main agent's
-context stays clean.
+The MCP tool returns the wall directly. Synthesis is the calling agent's
+responsibility — typically dispatched into an Agent/Task subagent so the wall
+never lands in the main context.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .config import DATA_DIR, NEIGHBOR_WINDOW, PROJECT_BOOST_FACTOR
 from .store import MemoryStore
@@ -27,27 +25,16 @@ from .trajectories import Trajectory, TrajectoryStore
 
 log = logging.getLogger(__name__)
 
-# JSONL log of every recall_memory call. One line per call, append-only.
+# JSONL log of every recall call. One line per call, append-only.
 # Used for trend analysis (latency drift, regression detection, A/B comparison
-# across model/version changes). Failures to write are swallowed — never let
-# a logging hiccup break the user's recall.
+# across version changes). Failures to write are swallowed — never let a
+# logging hiccup break the user's recall.
 RECALL_LOG_PATH = DATA_DIR / "recall_log.jsonl"
 
-SUBAGENT_TOKEN_BUDGET = 120_000  # wall-of-text cap (Opus has 200k; leave headroom)
+# Wall-of-text cap. The calling agent's Agent-tool subagent has the full 200k
+# context window; leave headroom for the question + system prompt + answer.
+WALL_TOKEN_BUDGET = 120_000
 CHARS_PER_TOKEN = 3.5
-
-SUBAGENT_MODEL = "opus"
-
-SUBAGENT_SYSTEM_PROMPT = """\
-You are a memory-retrieval assistant. The primary Claude agent has asked you to answer a question using excerpts from past conversations. Your job:
-
-1. Read the provided memory excerpts carefully. They are organized into "blocks" — each block is a contiguous stretch of conversation trajectories that were extracted earlier.
-2. Answer the question using ONLY information found in the excerpts. If the answer isn't there, say so plainly.
-3. Be concise (target 150-400 words). Cite specific trajectories or dates when relevant (e.g. "On 2026-04-21, ...").
-4. If excerpts contradict each other, note the discrepancy and prefer the most recent one.
-5. If the question is vague or unanswerable from these excerpts, briefly explain what IS in the excerpts that's adjacent to the question.
-
-Output plain prose, no markdown headers. The primary agent will quote or paraphrase your answer to the user."""
 
 
 @dataclass
@@ -308,7 +295,7 @@ def gather_windows(
 
 def render_wall(
     blocks: list[StitchedBlock],
-    budget_tokens: int = SUBAGENT_TOKEN_BUDGET,
+    budget_tokens: int = WALL_TOKEN_BUDGET,
 ) -> tuple[str, int]:
     """Render blocks as markdown. Returns (text, blocks_included)."""
     parts: list[str] = []
@@ -343,150 +330,23 @@ def render_wall(
     return "\n".join(parts).strip(), blocks_included
 
 
-async def call_subagent(
-    question: str,
-    wall: str,
-    model: str = SUBAGENT_MODEL,
-) -> tuple[str, dict[str, float]]:
-    """Spawn `claude -p --model <model>` and return (answer, timings_seconds).
-
-    Uses `--output-format stream-json` so we can timestamp the first event the
-    subagent emits, separating CLI cold-start + first-token latency from the
-    rest of generation. Timings dict keys: 'spawn' (process fork/exec),
-    'first_event' (start → first stdout line; ~ CLI startup + first token),
-    'complete' (start → process exit).
-    """
-    prompt = f"""## Question
-
-{question}
-
-## Memory Excerpts
-
-{wall}
-"""
-    # Wall-clock milestones inside the subagent process. Together they carve
-    # t_subagent into: boot (until system:init — CLI startup + SessionStart
-    # hooks), api_request (init → first stream_event = model started
-    # responding), gen (first stream_event → result event), cleanup (result →
-    # exit). `api_ttft_ms` is the API's own self-reported TTFT, surfaced in
-    # the message_start event.
-    timings: dict[str, float] = {
-        "spawn": 0.0,
-        "first_event": 0.0,
-        "system_init": 0.0,
-        "first_stream_event": 0.0,
-        "first_content_delta": 0.0,
-        "result_event": 0.0,
-        "complete": 0.0,
-        "api_ttft_ms": 0.0,  # from API's message_start event, not wall clock
-    }
-
-    t_start = time.perf_counter()
-    proc = await asyncio.create_subprocess_exec(
-        "claude", "-p",
-        "--model", model,
-        "--tools", "",
-        "--system-prompt", SUBAGENT_SYSTEM_PROMPT,
-        "--output-format", "stream-json",
-        "--verbose",  # required by claude CLI when stream-json output is used
-        "--include-partial-messages",  # so first_assistant_event ≈ true TTFT
-        "--no-session-persistence",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    timings["spawn"] = time.perf_counter() - t_start
-
-    proc.stdin.write(prompt.encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
-
-    events: list[dict] = []
-    first_event_at: float | None = None
-    seen: set[str] = set()
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            break
-        now = time.perf_counter() - t_start
-        if first_event_at is None:
-            first_event_at = now
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            log.debug("subagent emitted non-JSON line: %r", line[:200])
-            continue
-        events.append(event)
-        if not isinstance(event, dict):
-            continue
-        etype = event.get("type")
-        if etype == "system" and event.get("subtype") == "init" and "system_init" not in seen:
-            timings["system_init"] = now
-            seen.add("system_init")
-        elif etype == "stream_event":
-            if "first_stream_event" not in seen:
-                timings["first_stream_event"] = now
-                seen.add("first_stream_event")
-            inner = event.get("event") or {}
-            if isinstance(inner, dict):
-                # API self-reports TTFT on the message_start event — capture once.
-                if inner.get("type") == "message_start" and "api_ttft" not in seen:
-                    ttft = event.get("ttft_ms")
-                    if isinstance(ttft, (int, float)):
-                        timings["api_ttft_ms"] = float(ttft)
-                        seen.add("api_ttft")
-                if inner.get("type") == "content_block_delta" and "first_content_delta" not in seen:
-                    timings["first_content_delta"] = now
-                    seen.add("first_content_delta")
-        elif etype == "result" and "result_event" not in seen:
-            timings["result_event"] = now
-            seen.add("result_event")
-
-    rc = await proc.wait()
-    timings["complete"] = time.perf_counter() - t_start
-    if first_event_at is not None:
-        timings["first_event"] = first_event_at
-
-    if rc != 0:
-        stderr = (await proc.stderr.read()).decode()
-        raise RuntimeError(f"subagent failed (exit {rc}): {stderr}")
-
-    # Find the result event (final one, type='result') — falling back to any
-    # event with a 'result' field for forward-compatibility with format tweaks.
-    for event in reversed(events):
-        if isinstance(event, dict) and event.get("type") == "result":
-            return event.get("result") or "", timings
-    for event in reversed(events):
-        if isinstance(event, dict) and "result" in event:
-            return event["result"] or "", timings
-    raise ValueError(
-        f"Could not extract result from subagent stream "
-        f"({len(events)} events, types: {[e.get('type') for e in events[:5]]}...)"
-    )
-
-
 @dataclass
-class RecallResult:
-    answer: str
+class RecallContext:
+    """Diagnostics for a build_recall_wall() call. The wall itself is returned
+    alongside this — these are just the counts and phase timings useful for
+    logging and the tool's footer line."""
     hit_count: int
     block_count: int
     blocks_in_wall: int
     wall_chars: int
-    # Phase timings in seconds. `find_hits` further splits into keyword + vector
-    # contributions in `find_hits_breakdown`; `subagent` further splits into
-    # spawn / first_event / complete in `subagent_breakdown`. The split lets us
-    # tell how much of subagent cost is CLI cold-start (replaceable by an
-    # in-process SDK call) vs actual inference.
+    # Phase timings in seconds. `find_hits` splits into keyword + vector
+    # contributions in `find_hits_breakdown`. Synthesis is no longer ours to
+    # measure — the calling agent's Agent-tool dispatch owns that cost.
     t_find_hits: float = 0.0
     t_gather: float = 0.0
     t_render: float = 0.0
-    t_subagent: float = 0.0
     t_total: float = 0.0
     find_hits_breakdown: dict = field(default_factory=dict)
-    subagent_breakdown: dict = field(default_factory=dict)
 
 
 def _package_version() -> str:
@@ -499,12 +359,11 @@ def _package_version() -> str:
 
 def _append_recall_log(
     *,
-    result: RecallResult,
+    ctx: RecallContext,
     question: str,
     search_terms: list[str],
     current_project: str | None,
     strict_project: str | None,
-    model: str,
     mem_store: MemoryStore,
 ) -> None:
     """Append one JSON line per recall to RECALL_LOG_PATH. Best-effort —
@@ -518,31 +377,21 @@ def _append_recall_log(
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "version": _package_version(),
-            "model": model,
             "question": question[:500],
             "search_terms": search_terms,
             "current_project": current_project,
             "strict_project": strict_project,
             "corpus_size": corpus_size,
-            "hits": result.hit_count,
-            "blocks_total": result.block_count,
-            "blocks_in_wall": result.blocks_in_wall,
-            "wall_chars": result.wall_chars,
-            "t_total": round(result.t_total, 4),
-            "t_find_hits": round(result.t_find_hits, 4),
-            "t_find_keyword": round(result.find_hits_breakdown.get("keyword", 0.0), 4),
-            "t_find_vector": round(result.find_hits_breakdown.get("vector", 0.0), 4),
-            "t_gather": round(result.t_gather, 4),
-            "t_render": round(result.t_render, 4),
-            "t_subagent": round(result.t_subagent, 4),
-            "t_subagent_spawn": round(result.subagent_breakdown.get("spawn", 0.0), 4),
-            "t_subagent_first_event": round(result.subagent_breakdown.get("first_event", 0.0), 4),
-            "t_subagent_system_init": round(result.subagent_breakdown.get("system_init", 0.0), 4),
-            "t_subagent_first_stream_event": round(result.subagent_breakdown.get("first_stream_event", 0.0), 4),
-            "t_subagent_first_content_delta": round(result.subagent_breakdown.get("first_content_delta", 0.0), 4),
-            "t_subagent_result_event": round(result.subagent_breakdown.get("result_event", 0.0), 4),
-            "t_subagent_complete": round(result.subagent_breakdown.get("complete", 0.0), 4),
-            "api_ttft_ms": round(result.subagent_breakdown.get("api_ttft_ms", 0.0), 1),
+            "hits": ctx.hit_count,
+            "blocks_total": ctx.block_count,
+            "blocks_in_wall": ctx.blocks_in_wall,
+            "wall_chars": ctx.wall_chars,
+            "t_total": round(ctx.t_total, 4),
+            "t_find_hits": round(ctx.t_find_hits, 4),
+            "t_find_keyword": round(ctx.find_hits_breakdown.get("keyword", 0.0), 4),
+            "t_find_vector": round(ctx.find_hits_breakdown.get("vector", 0.0), 4),
+            "t_gather": round(ctx.t_gather, 4),
+            "t_render": round(ctx.t_render, 4),
         }
         RECALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with RECALL_LOG_PATH.open("a", encoding="utf-8") as f:
@@ -551,7 +400,7 @@ def _append_recall_log(
         log.debug("recall log write failed: %s", e)
 
 
-async def recall_memory(
+def build_recall_wall(
     search_terms: list[str],
     question: str,
     current_project: str | None = None,
@@ -559,14 +408,20 @@ async def recall_memory(
     traj_store: TrajectoryStore | None = None,
     mem_store: MemoryStore | None = None,
     pad: int = NEIGHBOR_WINDOW,
-    budget_tokens: int = SUBAGENT_TOKEN_BUDGET,
-    model: str = SUBAGENT_MODEL,
-) -> RecallResult:
-    """End-to-end deep-recall. Returns the subagent's synthesized answer + diagnostics.
+    budget_tokens: int = WALL_TOKEN_BUDGET,
+) -> tuple[str, RecallContext]:
+    """Find hits, gather neighbor-padded blocks, render the wall-of-text.
+
+    Returns (wall, ctx). The wall is markdown — empty string if nothing matched
+    or no EDUs could be retrieved. `ctx` carries diagnostic counts + phase
+    timings for logging.
 
     Recall is global by default. `current_project` is a soft boost — trajectories
     in that project rank higher than cross-project hits of comparable similarity.
     `strict_project` is a hard filter — restricts retrieval to that project only.
+
+    Synthesis is *not* this function's job. The calling agent should dispatch an
+    Agent/Task subagent with the wall + question and let it produce prose.
     """
     traj_store = traj_store or TrajectoryStore()
     mem_store = mem_store or MemoryStore()
@@ -584,13 +439,17 @@ async def recall_memory(
     t_find = time.perf_counter() - t0
 
     if not hit_ids:
-        scope = f"project '{strict_project}'" if strict_project else "any project"
-        return RecallResult(
-            answer=f"No memories matched the search terms or question across {scope}.",
+        ctx = RecallContext(
             hit_count=0, block_count=0, blocks_in_wall=0, wall_chars=0,
             t_find_hits=t_find, t_total=time.perf_counter() - t_total_start,
             find_hits_breakdown=find_breakdown,
         )
+        _append_recall_log(
+            ctx=ctx, question=question, search_terms=search_terms,
+            current_project=current_project, strict_project=strict_project,
+            mem_store=mem_store,
+        )
+        return "", ctx
 
     t0 = time.perf_counter()
     blocks = gather_windows(hit_ids, traj_store, mem_store, pad=pad)
@@ -600,21 +459,7 @@ async def recall_memory(
     wall, blocks_included = render_wall(blocks, budget_tokens=budget_tokens)
     t_render = time.perf_counter() - t0
 
-    if not wall.strip():
-        return RecallResult(
-            answer="Hits were found but their EDUs could not be retrieved from the memory store.",
-            hit_count=len(hit_ids), block_count=len(blocks), blocks_in_wall=0, wall_chars=0,
-            t_find_hits=t_find, t_gather=t_gather, t_render=t_render,
-            t_total=time.perf_counter() - t_total_start,
-            find_hits_breakdown=find_breakdown,
-        )
-
-    t0 = time.perf_counter()
-    answer, subagent_breakdown = await call_subagent(question, wall, model=model)
-    t_subagent = time.perf_counter() - t0
-
-    result = RecallResult(
-        answer=answer,
+    ctx = RecallContext(
         hit_count=len(hit_ids),
         block_count=len(blocks),
         blocks_in_wall=blocks_included,
@@ -622,18 +467,15 @@ async def recall_memory(
         t_find_hits=t_find,
         t_gather=t_gather,
         t_render=t_render,
-        t_subagent=t_subagent,
         t_total=time.perf_counter() - t_total_start,
         find_hits_breakdown=find_breakdown,
-        subagent_breakdown=subagent_breakdown,
     )
     _append_recall_log(
-        result=result,
+        ctx=ctx,
         question=question,
         search_terms=search_terms,
         current_project=current_project,
         strict_project=strict_project,
-        model=model,
         mem_store=mem_store,
     )
-    return result
+    return wall, ctx

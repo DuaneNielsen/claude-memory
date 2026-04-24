@@ -58,21 +58,6 @@ def main():
     reindex_p = sub.add_parser("reindex", help="Rebuild project memory indices")
     reindex_p.add_argument("--project", help="Rebuild one project's index (default: all)")
 
-    # recall (subagent deep-recall, for testing)
-    recall_p = sub.add_parser("recall", help="Deep-recall via Opus subagent")
-    recall_p.add_argument("question", help="The question to answer from memory")
-    recall_p.add_argument("--terms", nargs="*", default=[], help="Keyword search terms")
-    recall_p.add_argument(
-        "--project",
-        help="Project name used as a soft ranking boost (default: derived from cwd). "
-             "Cross-project hits still surface.",
-    )
-    recall_p.add_argument(
-        "--strict-project",
-        help="Hard-filter recall to this project only (overrides boost behavior).",
-    )
-    recall_p.add_argument("--model", default="opus", help="Subagent model (default: opus)")
-
     # serve (MCP server)
     sub.add_parser("serve", help="Run MCP server (stdio)")
 
@@ -293,40 +278,6 @@ def main():
         save_ingestion_state(state)
 
         print(f"Reset {len(targets)} session(s). Run `claude-memory ingest` to reprocess.")
-
-    elif args.command == "recall":
-        from .parser import project_from_cwd
-        from .retrieval import recall_memory
-        current_project = args.project or project_from_cwd()
-        result = asyncio.run(recall_memory(
-            search_terms=args.terms,
-            question=args.question,
-            current_project=current_project,
-            strict_project=args.strict_project,
-            model=args.model,
-        ))
-        print(result.answer)
-        kw = result.find_hits_breakdown.get("keyword", 0.0)
-        vec = result.find_hits_breakdown.get("vector", 0.0)
-        sb = result.subagent_breakdown
-        boot = sb.get("system_init", 0.0)
-        api_req = max(0.0, sb.get("first_stream_event", 0.0) - sb.get("system_init", 0.0))
-        gen = max(0.0, sb.get("result_event", 0.0) - sb.get("first_stream_event", 0.0))
-        cleanup = max(0.0, sb.get("complete", 0.0) - sb.get("result_event", 0.0))
-        api_ttft = sb.get("api_ttft_ms", 0.0) / 1000.0
-        print(
-            f"\n---\n(diagnostics: {result.hit_count} hits, "
-            f"{result.block_count} blocks, {result.blocks_in_wall} in wall, "
-            f"{result.wall_chars} chars)"
-        )
-        print(
-            f"(timing: total={result.t_total:.2f}s | "
-            f"find={result.t_find_hits:.2f}s [kw={kw:.2f}, vec={vec:.2f}] | "
-            f"gather={result.t_gather:.2f}s | render={result.t_render:.3f}s | "
-            f"subagent={result.t_subagent:.2f}s "
-            f"[boot={boot:.2f}, api_req={api_req:.2f} (api_ttft={api_ttft:.2f}), "
-            f"gen={gen:.2f}, cleanup={cleanup:.3f}])"
-        )
 
     elif args.command == "reindex":
         from .index_builder import write_index
