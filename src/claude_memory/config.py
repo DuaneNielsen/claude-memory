@@ -20,9 +20,24 @@ DEFAULT_MODEL = "sonnet"
 # Embedding model
 EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 
-# EDU extraction
-MAX_TURNS_PER_CHUNK = 30
+# EDU extraction uses a sliding "core + context margin" scheme:
+# each chunk has a CORE region of turns that EDUs are extracted from, bracketed
+# by CONTEXT_MARGIN turns on each side that the LLM sees for understanding but
+# does NOT extract from. This removes the cliff-edge that caused the LLM to
+# hallucinate citations just past the chunk boundary.
+CHUNK_CORE_SIZE = 200
+CHUNK_CONTEXT_MARGIN = 10
+# Kept as legacy aliases (used by old extract_edus_from_session code path).
+MAX_TURNS_PER_CHUNK = CHUNK_CORE_SIZE
 CHUNK_OVERLAP_TURNS = 5
+
+# Boundary classification (stage 2 of trajectory extraction).
+# For each adjacent EDU pair, a classifier sees this many EDUs total as a
+# sliding window — default 3 means (previous, candidate, lookahead). Bigger
+# windows give more context but more tokens per call.
+BOUNDARY_WINDOW_SIZE = 5
+BOUNDARY_CONCURRENCY = 10
+BOUNDARY_MODEL = "sonnet"
 
 # Retrieval
 RETRIEVAL_CANDIDATES = 30
