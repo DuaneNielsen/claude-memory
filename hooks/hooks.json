@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -d \"${CLAUDE_PLUGIN_ROOT}/.venv\" || (cd \"${CLAUDE_PLUGIN_ROOT}\" && uv sync --quiet)"
+            "command": "test -x \"${CLAUDE_PLUGIN_ROOT}/.venv/bin/python\" || (cd \"${CLAUDE_PLUGIN_ROOT}\" && uv sync --quiet)"
           },
           {
             "type": "command",
