@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,8 +73,9 @@ def _find_hit_trajectory_ids(
     mem_store: MemoryStore,
     vector_n: int = 30,
     boost_factor: float = PROJECT_BOOST_FACTOR,
-) -> list[str]:
-    """Return trajectory_ids from keyword + vector hits, ordered by boosted score.
+) -> tuple[list[str], dict[str, float]]:
+    """Return (trajectory_ids, timings_seconds). Trajectory_ids are ordered by
+    boosted score across keyword + vector hits.
 
     - `current_project`: trajectories in this project get score * boost_factor.
     - `strict_project`: hard filter — only consider trajectories in this project.
@@ -82,16 +84,23 @@ def _find_hit_trajectory_ids(
     Default (both None): global search, no boost. When `current_project` is set
     without `strict_project`, cross-project hits are returned but ranked below
     same-project hits of comparable similarity.
+
+    Timings dict keys: 'keyword' (SQLite keyword lookup), 'vector' (embed +
+    ChromaDB query), 'total'.
     """
     scores: dict[str, float] = {}
+    timings: dict[str, float] = {"keyword": 0.0, "vector": 0.0}
 
     def _bump(tid: str, score: float):
         if tid:
             scores[tid] = max(scores.get(tid, 0.0), score)
 
+    t_start = time.perf_counter()
+
     if search_terms:
         normalized = [t.strip().lower() for t in search_terms if t and t.strip()]
         if normalized:
+            t0 = time.perf_counter()
             if strict_project:
                 for tid in traj_store.search_by_keywords(strict_project, normalized):
                     _bump(tid, 1.0)  # keyword hit baseline
@@ -99,8 +108,10 @@ def _find_hit_trajectory_ids(
                 for tid, project in traj_store.search_by_keywords_global(normalized):
                     boost = boost_factor if project == current_project else 1.0
                     _bump(tid, 1.0 * boost)
+            timings["keyword"] = time.perf_counter() - t0
 
     if question and question.strip():
+        t0 = time.perf_counter()
         if strict_project:
             where = {"$and": [
                 {"project": {"$eq": strict_project}},
@@ -119,8 +130,11 @@ def _find_hit_trajectory_ids(
             project = meta.get("project") or ""
             boost = boost_factor if (current_project and project == current_project) else 1.0
             _bump(tid, similarity * boost)
+        timings["vector"] = time.perf_counter() - t0
 
-    return [tid for tid, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
+    timings["total"] = time.perf_counter() - t_start
+    ranked = [tid for tid, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
+    return ranked, timings
 
 
 def _group_trajectories_by_session(trajectories: list[Trajectory]) -> dict[str, list[Trajectory]]:
@@ -377,6 +391,15 @@ class RecallResult:
     block_count: int
     blocks_in_wall: int
     wall_chars: int
+    # Phase timings in seconds. `find_hits` further splits into keyword + vector
+    # contributions in `find_hits_breakdown`. `subagent` is the dominant cost in
+    # the typical case; instrument here so we can keep an eye on the others.
+    t_find_hits: float = 0.0
+    t_gather: float = 0.0
+    t_render: float = 0.0
+    t_subagent: float = 0.0
+    t_total: float = 0.0
+    find_hits_breakdown: dict = field(default_factory=dict)
 
 
 async def recall_memory(
@@ -399,34 +422,58 @@ async def recall_memory(
     traj_store = traj_store or TrajectoryStore()
     mem_store = mem_store or MemoryStore()
 
-    hit_ids = _find_hit_trajectory_ids(
+    t_total_start = time.perf_counter()
+
+    t0 = time.perf_counter()
+    hit_ids, find_breakdown = _find_hit_trajectory_ids(
         search_terms, question,
         current_project=current_project,
         strict_project=strict_project,
         traj_store=traj_store,
         mem_store=mem_store,
     )
+    t_find = time.perf_counter() - t0
+
     if not hit_ids:
         scope = f"project '{strict_project}'" if strict_project else "any project"
         return RecallResult(
             answer=f"No memories matched the search terms or question across {scope}.",
             hit_count=0, block_count=0, blocks_in_wall=0, wall_chars=0,
+            t_find_hits=t_find, t_total=time.perf_counter() - t_total_start,
+            find_hits_breakdown=find_breakdown,
         )
 
+    t0 = time.perf_counter()
     blocks = gather_windows(hit_ids, traj_store, mem_store, pad=pad)
+    t_gather = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     wall, blocks_included = render_wall(blocks, budget_tokens=budget_tokens)
+    t_render = time.perf_counter() - t0
 
     if not wall.strip():
         return RecallResult(
             answer="Hits were found but their EDUs could not be retrieved from the memory store.",
             hit_count=len(hit_ids), block_count=len(blocks), blocks_in_wall=0, wall_chars=0,
+            t_find_hits=t_find, t_gather=t_gather, t_render=t_render,
+            t_total=time.perf_counter() - t_total_start,
+            find_hits_breakdown=find_breakdown,
         )
 
+    t0 = time.perf_counter()
     answer = await call_subagent(question, wall, model=model)
+    t_subagent = time.perf_counter() - t0
+
     return RecallResult(
         answer=answer,
         hit_count=len(hit_ids),
         block_count=len(blocks),
         blocks_in_wall=blocks_included,
         wall_chars=len(wall),
+        t_find_hits=t_find,
+        t_gather=t_gather,
+        t_render=t_render,
+        t_subagent=t_subagent,
+        t_total=time.perf_counter() - t_total_start,
+        find_hits_breakdown=find_breakdown,
     )

@@ -151,11 +151,17 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     except Exception as e:
         return [TextContent(type="text", text=f"recall_memory failed: {e}")]
 
+    kw = result.find_hits_breakdown.get("keyword", 0.0)
+    vec = result.find_hits_breakdown.get("vector", 0.0)
     diag = (
         f"\n\n---\n"
         f"(recall diagnostics: {result.hit_count} trajectory hits, "
         f"{result.block_count} blocks stitched, {result.blocks_in_wall} included, "
-        f"{result.wall_chars} chars of context)"
+        f"{result.wall_chars} chars of context)\n"
+        f"(timing: total={result.t_total:.2f}s | "
+        f"find={result.t_find_hits:.2f}s [kw={kw:.2f}, vec={vec:.2f}] | "
+        f"gather={result.t_gather:.2f}s | render={result.t_render:.3f}s | "
+        f"subagent={result.t_subagent:.2f}s)"
     )
     return [TextContent(type="text", text=result.answer + diag)]
 
