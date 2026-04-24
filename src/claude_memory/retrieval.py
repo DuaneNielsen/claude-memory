@@ -21,11 +21,17 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import NEIGHBOR_WINDOW, PROJECT_BOOST_FACTOR
+from .config import DATA_DIR, NEIGHBOR_WINDOW, PROJECT_BOOST_FACTOR
 from .store import MemoryStore
 from .trajectories import Trajectory, TrajectoryStore
 
 log = logging.getLogger(__name__)
+
+# JSONL log of every recall_memory call. One line per call, append-only.
+# Used for trend analysis (latency drift, regression detection, A/B comparison
+# across model/version changes). Failures to write are swallowed — never let
+# a logging hiccup break the user's recall.
+RECALL_LOG_PATH = DATA_DIR / "recall_log.jsonl"
 
 SUBAGENT_TOKEN_BUDGET = 120_000  # wall-of-text cap (Opus has 200k; leave headroom)
 CHARS_PER_TOKEN = 3.5
@@ -341,8 +347,15 @@ async def call_subagent(
     question: str,
     wall: str,
     model: str = SUBAGENT_MODEL,
-) -> str:
-    """Spawn `claude -p --model <model>` with the subagent system prompt and return its text answer."""
+) -> tuple[str, dict[str, float]]:
+    """Spawn `claude -p --model <model>` and return (answer, timings_seconds).
+
+    Uses `--output-format stream-json` so we can timestamp the first event the
+    subagent emits, separating CLI cold-start + first-token latency from the
+    rest of generation. Timings dict keys: 'spawn' (process fork/exec),
+    'first_event' (start → first stdout line; ~ CLI startup + first token),
+    'complete' (start → process exit).
+    """
     prompt = f"""## Question
 
 {question}
@@ -351,37 +364,64 @@ async def call_subagent(
 
 {wall}
 """
+    timings: dict[str, float] = {"spawn": 0.0, "first_event": 0.0, "complete": 0.0}
+
+    t_start = time.perf_counter()
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
         "--model", model,
         "--tools", "",
         "--system-prompt", SUBAGENT_SYSTEM_PROMPT,
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",  # required by claude CLI when stream-json output is used
         "--no-session-persistence",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate(prompt.encode())
-    if proc.returncode != 0:
-        raise RuntimeError(f"subagent failed (exit {proc.returncode}): {stderr.decode()}")
+    timings["spawn"] = time.perf_counter() - t_start
 
-    content = stdout.decode().strip()
-    if not content:
-        raise ValueError("subagent returned empty output")
+    proc.stdin.write(prompt.encode())
+    await proc.stdin.drain()
+    proc.stdin.close()
 
-    # `claude -p --output-format json` streams events; the final one has the assistant response
-    events = json.loads(content)
-    if isinstance(events, list):
-        for event in reversed(events):
-            if isinstance(event, dict) and event.get("type") == "result":
-                return event.get("result") or ""
-            if isinstance(event, dict) and "result" in event:
-                return event["result"] or ""
-    # Fallback: if we got a single dict with a text field
-    if isinstance(events, dict) and "result" in events:
-        return events["result"] or ""
-    raise ValueError(f"Could not extract result from subagent response")
+    events: list[dict] = []
+    first_event_at: float | None = None
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        if first_event_at is None:
+            first_event_at = time.perf_counter() - t_start
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            log.debug("subagent emitted non-JSON line: %r", line[:200])
+
+    rc = await proc.wait()
+    timings["complete"] = time.perf_counter() - t_start
+    if first_event_at is not None:
+        timings["first_event"] = first_event_at
+
+    if rc != 0:
+        stderr = (await proc.stderr.read()).decode()
+        raise RuntimeError(f"subagent failed (exit {rc}): {stderr}")
+
+    # Find the result event (final one, type='result') — falling back to any
+    # event with a 'result' field for forward-compatibility with format tweaks.
+    for event in reversed(events):
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event.get("result") or "", timings
+    for event in reversed(events):
+        if isinstance(event, dict) and "result" in event:
+            return event["result"] or "", timings
+    raise ValueError(
+        f"Could not extract result from subagent stream "
+        f"({len(events)} events, types: {[e.get('type') for e in events[:5]]}...)"
+    )
 
 
 @dataclass
@@ -392,14 +432,74 @@ class RecallResult:
     blocks_in_wall: int
     wall_chars: int
     # Phase timings in seconds. `find_hits` further splits into keyword + vector
-    # contributions in `find_hits_breakdown`. `subagent` is the dominant cost in
-    # the typical case; instrument here so we can keep an eye on the others.
+    # contributions in `find_hits_breakdown`; `subagent` further splits into
+    # spawn / first_event / complete in `subagent_breakdown`. The split lets us
+    # tell how much of subagent cost is CLI cold-start (replaceable by an
+    # in-process SDK call) vs actual inference.
     t_find_hits: float = 0.0
     t_gather: float = 0.0
     t_render: float = 0.0
     t_subagent: float = 0.0
     t_total: float = 0.0
     find_hits_breakdown: dict = field(default_factory=dict)
+    subagent_breakdown: dict = field(default_factory=dict)
+
+
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("claude-memory")
+    except Exception:
+        return "unknown"
+
+
+def _append_recall_log(
+    *,
+    result: RecallResult,
+    question: str,
+    search_terms: list[str],
+    current_project: str | None,
+    strict_project: str | None,
+    model: str,
+    mem_store: MemoryStore,
+) -> None:
+    """Append one JSON line per recall to RECALL_LOG_PATH. Best-effort —
+    log failures must not break recall."""
+    try:
+        from datetime import datetime, timezone
+        try:
+            corpus_size = mem_store.count()
+        except Exception:
+            corpus_size = -1
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "version": _package_version(),
+            "model": model,
+            "question": question[:500],
+            "search_terms": search_terms,
+            "current_project": current_project,
+            "strict_project": strict_project,
+            "corpus_size": corpus_size,
+            "hits": result.hit_count,
+            "blocks_total": result.block_count,
+            "blocks_in_wall": result.blocks_in_wall,
+            "wall_chars": result.wall_chars,
+            "t_total": round(result.t_total, 4),
+            "t_find_hits": round(result.t_find_hits, 4),
+            "t_find_keyword": round(result.find_hits_breakdown.get("keyword", 0.0), 4),
+            "t_find_vector": round(result.find_hits_breakdown.get("vector", 0.0), 4),
+            "t_gather": round(result.t_gather, 4),
+            "t_render": round(result.t_render, 4),
+            "t_subagent": round(result.t_subagent, 4),
+            "t_subagent_spawn": round(result.subagent_breakdown.get("spawn", 0.0), 4),
+            "t_subagent_first_event": round(result.subagent_breakdown.get("first_event", 0.0), 4),
+            "t_subagent_complete": round(result.subagent_breakdown.get("complete", 0.0), 4),
+        }
+        RECALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with RECALL_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.debug("recall log write failed: %s", e)
 
 
 async def recall_memory(
@@ -461,10 +561,10 @@ async def recall_memory(
         )
 
     t0 = time.perf_counter()
-    answer = await call_subagent(question, wall, model=model)
+    answer, subagent_breakdown = await call_subagent(question, wall, model=model)
     t_subagent = time.perf_counter() - t0
 
-    return RecallResult(
+    result = RecallResult(
         answer=answer,
         hit_count=len(hit_ids),
         block_count=len(blocks),
@@ -476,4 +576,15 @@ async def recall_memory(
         t_subagent=t_subagent,
         t_total=time.perf_counter() - t_total_start,
         find_hits_breakdown=find_breakdown,
+        subagent_breakdown=subagent_breakdown,
     )
+    _append_recall_log(
+        result=result,
+        question=question,
+        search_terms=search_terms,
+        current_project=current_project,
+        strict_project=strict_project,
+        model=model,
+        mem_store=mem_store,
+    )
+    return result

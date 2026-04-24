@@ -308,6 +308,8 @@ def main():
         print(result.answer)
         kw = result.find_hits_breakdown.get("keyword", 0.0)
         vec = result.find_hits_breakdown.get("vector", 0.0)
+        sa_spawn = result.subagent_breakdown.get("spawn", 0.0)
+        sa_first = result.subagent_breakdown.get("first_event", 0.0)
         print(
             f"\n---\n(diagnostics: {result.hit_count} hits, "
             f"{result.block_count} blocks, {result.blocks_in_wall} in wall, "
@@ -317,7 +319,7 @@ def main():
             f"(timing: total={result.t_total:.2f}s | "
             f"find={result.t_find_hits:.2f}s [kw={kw:.2f}, vec={vec:.2f}] | "
             f"gather={result.t_gather:.2f}s | render={result.t_render:.3f}s | "
-            f"subagent={result.t_subagent:.2f}s)"
+            f"subagent={result.t_subagent:.2f}s [spawn={sa_spawn:.3f}, first_event={sa_first:.2f}])"
         )
 
     elif args.command == "reindex":
