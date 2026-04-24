@@ -42,49 +42,13 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
-        Tool(
-            name="search_conversation_memory",
-            description=(
-                "Search past Claude Code conversations for relevant context. "
-                "Search when the user references past work, asks about previous decisions, "
-                "or when the task involves systems that may have been configured or debugged before. "
-                "Also search proactively when context seems to be missing. "
-                "The query is fast and a miss costs nothing. "
-                "Search is global across projects by default; the current project is used as a "
-                "soft ranking boost. Pass `strict_project` only when you genuinely want to "
-                "exclude cross-project hits (rare — e.g. the user explicitly says 'only frigate stuff')."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language search query",
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": (
-                            "Optional: project name used as a soft RANKING BOOST — results from "
-                            "this project rank higher, but cross-project results still surface. "
-                            "If omitted, derived from the current working directory."
-                        ),
-                    },
-                    "strict_project": {
-                        "type": "string",
-                        "description": (
-                            "Optional HARD FILTER: restrict results to this project only. "
-                            "Use this only when project isolation is explicitly required."
-                        ),
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Number of results to return (default 10)",
-                        "default": 10,
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
+        # search_conversation_memory is intentionally hidden from list_tools
+        # as of 0.5.0 — recall_memory covers the same ground with stitched
+        # neighbor context and subagent synthesis. The handler below
+        # (_handle_search) and call_tool dispatch are kept so it can be
+        # re-enabled by adding a Tool() entry back here if recall proves too
+        # slow for quick lookups. Pruning the calling-agent's choice down to
+        # one memory tool also removes a routing decision it gets wrong.
         Tool(
             name="recall_memory",
             description=(
