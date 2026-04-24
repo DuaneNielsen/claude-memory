@@ -228,6 +228,9 @@ Now process this input:
         prompt = text
 
     t_start = time.monotonic()
+    # Pass the prompt as a positional arg rather than via stdin to avoid the
+    # claude CLI's "no stdin data received in 3s" race under concurrent-process
+    # load (multiple subprocesses fighting for I/O during stage 2).
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
         "--model", model,
@@ -236,7 +239,8 @@ Now process this input:
         "--json-schema", schema,
         "--output-format", "json",
         "--no-session-persistence",
-        stdin=asyncio.subprocess.PIPE,
+        prompt,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         # Run from /tmp so cwd-traversal doesn't find ~/CLAUDE.md and inject
@@ -244,7 +248,7 @@ Now process this input:
         # "session" trajectories whose facts actually came from CLAUDE.md.
         cwd="/tmp",
     )
-    stdout, stderr = await proc.communicate(prompt.encode())
+    stdout, stderr = await proc.communicate()
     elapsed = time.monotonic() - t_start
     stdout_str = stdout.decode()
     stderr_str = stderr.decode()
@@ -539,40 +543,70 @@ def _format_edu_extraction_input(
     If core_turn_ids is provided, turns are grouped into CONTEXT (not for
     extraction) and CORE (extract EDUs from these) sections so the LLM can
     see surrounding conversation without being tempted to extract from it.
+
+    The input is bracketed by explicit BEGIN/END markers with a random nonce
+    so the LLM cannot mentally "continue past" the visible turns.
     """
-    lines = [f"Session date: {session_date}", f"Project: {project}", ""]
+    all_turn_ids = sorted({t.turn_id for t in turns})
+    nonce = uuid.uuid4().hex[:8]
+
+    lines = [f"=== BEGIN INPUT [nonce: {nonce}] ===",
+             f"Session date: {session_date}",
+             f"Project: {project}"]
+
+    # Explicit turn-range bound: tell the LLM the valid citation range.
+    # This reduces hallucination of fabricated "continuation" turns.
+    if all_turn_ids:
+        lines.append(
+            f"Turns in this input range from {all_turn_ids[0]} to {all_turn_ids[-1]} "
+            f"(total {len(all_turn_ids)}). Every source_turn_ids value MUST be within this range."
+        )
+        if core_turn_ids is not None:
+            core_list = sorted(core_turn_ids)
+            lines.append(
+                f"Of those, CORE turns (the only ones you may extract EDUs from) are "
+                f"{core_list[0]} to {core_list[-1]} (total {len(core_list)})."
+            )
+    lines.append("")
 
     if core_turn_ids is None or all(t.turn_id in core_turn_ids for t in turns):
         for t in turns:
             lines.append(f"Turn {t.turn_id} [{t.speaker}]: {t.text}")
-        return "\n".join(lines)
+    else:
+        # Split turns into pre-context / core / post-context segments
+        sections: list[tuple[str, list[Turn]]] = []
+        current_section = None
+        current_turns: list[Turn] = []
+        for t in turns:
+            section = "core" if t.turn_id in core_turn_ids else "context"
+            if section != current_section:
+                if current_turns:
+                    sections.append((current_section, current_turns))
+                current_section = section
+                current_turns = [t]
+            else:
+                current_turns.append(t)
+        if current_turns:
+            sections.append((current_section, current_turns))
 
-    # Split turns into pre-context / core / post-context segments (they're
-    # already contiguous; we just need to detect the group boundaries).
-    sections: list[tuple[str, list[Turn]]] = []
-    current_section = None  # "context" or "core"
-    current_turns: list[Turn] = []
-    for t in turns:
-        section = "core" if t.turn_id in core_turn_ids else "context"
-        if section != current_section:
-            if current_turns:
-                sections.append((current_section, current_turns))
-            current_section = section
-            current_turns = [t]
-        else:
-            current_turns.append(t)
-    if current_turns:
-        sections.append((current_section, current_turns))
+        for sec_name, sec_turns in sections:
+            if sec_name == "context":
+                lines.append("=== CONTEXT (for understanding only — do NOT extract EDUs from these turns) ===")
+            else:
+                lines.append("=== CORE (extract EDUs ONLY from these turns) ===")
+            for t in sec_turns:
+                lines.append(f"Turn {t.turn_id} [{t.speaker}]: {t.text}")
+            lines.append("")
 
-    for sec_name, sec_turns in sections:
-        if sec_name == "context":
-            lines.append("=== CONTEXT (for understanding only — do NOT extract EDUs from these turns) ===")
-        else:
-            lines.append("=== CORE (extract EDUs ONLY from these turns) ===")
-        for t in sec_turns:
-            lines.append(f"Turn {t.turn_id} [{t.speaker}]: {t.text}")
-        lines.append("")
-
+    # Unambiguous end sentinel. No turns exist past this marker; the nonce
+    # makes the boundary token impossible to pattern-match from training data.
+    if all_turn_ids:
+        lines.append(
+            f"=== END INPUT [nonce: {nonce}] — no turns exist beyond this point "
+            f"(session had {len(all_turn_ids)} turns: {all_turn_ids[0]}-{all_turn_ids[-1]}) ==="
+        )
+    else:
+        lines.append(f"=== END INPUT [nonce: {nonce}] ===")
     return "\n".join(lines)
 
 
@@ -677,6 +711,10 @@ def _parse_edus_from_chunk_result(
     valid_ids = core_turn_ids if core_turn_ids is not None else window_turn_ids
     turn_by_id = {t.turn_id: t for t in chunk}
     edus: list[EDU] = []
+    dropped_count = 0
+    clipped_count = 0
+    sample_drops: list[list[int]] = []
+    sample_clips: list[list[int]] = []
     for raw in result.get("edus", []) or []:
         text = str(raw.get("text", "")).strip()
         if not text:
@@ -692,18 +730,14 @@ def _parse_edus_from_chunk_result(
         # hallucinated past the window or only referenced context-only turns.
         source_ids = [s for s in source_ids_all if s in valid_ids]
         if not source_ids:
-            core_range = f"{min(valid_ids)}-{max(valid_ids)}" if valid_ids else "empty"
-            log.warning(
-                f"Dropping EDU with no valid source_turn_ids: cited={source_ids_all}, "
-                f"core turns {core_range} in session {session.session_id[:8]}"
-            )
+            dropped_count += 1
+            if len(sample_drops) < 3:
+                sample_drops.append(source_ids_all)
             continue
         if len(source_ids) < len(source_ids_all):
-            dropped = [s for s in source_ids_all if s not in valid_ids]
-            log.debug(
-                f"Clipped non-core source_turn_ids {dropped} from EDU "
-                f"(kept {source_ids}) in session {session.session_id[:8]}"
-            )
+            clipped_count += 1
+            if len(sample_clips) < 3:
+                sample_clips.append([s for s in source_ids_all if s not in valid_ids])
 
         seen_texts.add(normalized)
         source_turns = [turn_by_id[s] for s in source_ids if s in turn_by_id]
@@ -720,6 +754,17 @@ def _parse_edus_from_chunk_result(
             speakers=speakers,
             tag=EDUTag.coerce(raw.get("tag")),
         ))
+
+    if dropped_count or clipped_count:
+        core_range = f"{min(valid_ids)}-{max(valid_ids)}" if valid_ids else "empty"
+        parts = []
+        if dropped_count:
+            parts.append(f"dropped {dropped_count} (sample cites: {sample_drops})")
+        if clipped_count:
+            parts.append(f"clipped context-only turns from {clipped_count} (sample: {sample_clips})")
+        log.warning(
+            f"Session {session.session_id[:8]} core={core_range}: {'; '.join(parts)}"
+        )
     return edus
 
 

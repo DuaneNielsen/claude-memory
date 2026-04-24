@@ -63,7 +63,16 @@ def main():
     args = parser.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
+    # Prefix non-INFO messages with the level name so warnings stand out amid
+    # the progress bar output. INFO stays unprefixed for readability.
+    class _LevelFormatter(logging.Formatter):
+        def format(self, record):
+            if record.levelno >= logging.WARNING:
+                return f"[{record.levelname}] {record.getMessage()}"
+            return record.getMessage()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_LevelFormatter())
+    logging.basicConfig(level=level, handlers=[handler])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
