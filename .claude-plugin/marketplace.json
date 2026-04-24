@@ -11,7 +11,7 @@
     {
       "name": "claude-memory",
       "description": "Conversation memory for Claude Code — extracts atomic facts from past sessions and exposes semantic search via MCP",
-      "version": "0.5.2",
+      "version": "0.5.3",
       "author": {
         "name": "Duane Nielsen",
         "url": "https://github.com/DuaneNielsen"

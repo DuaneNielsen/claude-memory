@@ -308,8 +308,12 @@ def main():
         print(result.answer)
         kw = result.find_hits_breakdown.get("keyword", 0.0)
         vec = result.find_hits_breakdown.get("vector", 0.0)
-        sa_spawn = result.subagent_breakdown.get("spawn", 0.0)
-        sa_first = result.subagent_breakdown.get("first_event", 0.0)
+        sb = result.subagent_breakdown
+        boot = sb.get("system_init", 0.0)
+        api_req = max(0.0, sb.get("first_stream_event", 0.0) - sb.get("system_init", 0.0))
+        gen = max(0.0, sb.get("result_event", 0.0) - sb.get("first_stream_event", 0.0))
+        cleanup = max(0.0, sb.get("complete", 0.0) - sb.get("result_event", 0.0))
+        api_ttft = sb.get("api_ttft_ms", 0.0) / 1000.0
         print(
             f"\n---\n(diagnostics: {result.hit_count} hits, "
             f"{result.block_count} blocks, {result.blocks_in_wall} in wall, "
@@ -319,7 +323,9 @@ def main():
             f"(timing: total={result.t_total:.2f}s | "
             f"find={result.t_find_hits:.2f}s [kw={kw:.2f}, vec={vec:.2f}] | "
             f"gather={result.t_gather:.2f}s | render={result.t_render:.3f}s | "
-            f"subagent={result.t_subagent:.2f}s [spawn={sa_spawn:.3f}, first_event={sa_first:.2f}])"
+            f"subagent={result.t_subagent:.2f}s "
+            f"[boot={boot:.2f}, api_req={api_req:.2f} (api_ttft={api_ttft:.2f}), "
+            f"gen={gen:.2f}, cleanup={cleanup:.3f}])"
         )
 
     elif args.command == "reindex":

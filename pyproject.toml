@@ -1,6 +1,6 @@
 [project]
 name = "claude-memory"
-version = "0.5.2"
+version = "0.5.3"
 description = "Local memory system for Claude Code conversations"
 readme = "README.md"
 authors = [

@@ -364,7 +364,22 @@ async def call_subagent(
 
 {wall}
 """
-    timings: dict[str, float] = {"spawn": 0.0, "first_event": 0.0, "complete": 0.0}
+    # Wall-clock milestones inside the subagent process. Together they carve
+    # t_subagent into: boot (until system:init — CLI startup + SessionStart
+    # hooks), api_request (init → first stream_event = model started
+    # responding), gen (first stream_event → result event), cleanup (result →
+    # exit). `api_ttft_ms` is the API's own self-reported TTFT, surfaced in
+    # the message_start event.
+    timings: dict[str, float] = {
+        "spawn": 0.0,
+        "first_event": 0.0,
+        "system_init": 0.0,
+        "first_stream_event": 0.0,
+        "first_content_delta": 0.0,
+        "result_event": 0.0,
+        "complete": 0.0,
+        "api_ttft_ms": 0.0,  # from API's message_start event, not wall clock
+    }
 
     t_start = time.perf_counter()
     proc = await asyncio.create_subprocess_exec(
@@ -374,6 +389,7 @@ async def call_subagent(
         "--system-prompt", SUBAGENT_SYSTEM_PROMPT,
         "--output-format", "stream-json",
         "--verbose",  # required by claude CLI when stream-json output is used
+        "--include-partial-messages",  # so first_assistant_event ≈ true TTFT
         "--no-session-persistence",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -387,19 +403,47 @@ async def call_subagent(
 
     events: list[dict] = []
     first_event_at: float | None = None
+    seen: set[str] = set()
     while True:
         line = await proc.stdout.readline()
         if not line:
             break
+        now = time.perf_counter() - t_start
         if first_event_at is None:
-            first_event_at = time.perf_counter() - t_start
+            first_event_at = now
         line = line.strip()
         if not line:
             continue
         try:
-            events.append(json.loads(line))
+            event = json.loads(line)
         except json.JSONDecodeError:
             log.debug("subagent emitted non-JSON line: %r", line[:200])
+            continue
+        events.append(event)
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        if etype == "system" and event.get("subtype") == "init" and "system_init" not in seen:
+            timings["system_init"] = now
+            seen.add("system_init")
+        elif etype == "stream_event":
+            if "first_stream_event" not in seen:
+                timings["first_stream_event"] = now
+                seen.add("first_stream_event")
+            inner = event.get("event") or {}
+            if isinstance(inner, dict):
+                # API self-reports TTFT on the message_start event — capture once.
+                if inner.get("type") == "message_start" and "api_ttft" not in seen:
+                    ttft = event.get("ttft_ms")
+                    if isinstance(ttft, (int, float)):
+                        timings["api_ttft_ms"] = float(ttft)
+                        seen.add("api_ttft")
+                if inner.get("type") == "content_block_delta" and "first_content_delta" not in seen:
+                    timings["first_content_delta"] = now
+                    seen.add("first_content_delta")
+        elif etype == "result" and "result_event" not in seen:
+            timings["result_event"] = now
+            seen.add("result_event")
 
     rc = await proc.wait()
     timings["complete"] = time.perf_counter() - t_start
@@ -493,7 +537,12 @@ def _append_recall_log(
             "t_subagent": round(result.t_subagent, 4),
             "t_subagent_spawn": round(result.subagent_breakdown.get("spawn", 0.0), 4),
             "t_subagent_first_event": round(result.subagent_breakdown.get("first_event", 0.0), 4),
+            "t_subagent_system_init": round(result.subagent_breakdown.get("system_init", 0.0), 4),
+            "t_subagent_first_stream_event": round(result.subagent_breakdown.get("first_stream_event", 0.0), 4),
+            "t_subagent_first_content_delta": round(result.subagent_breakdown.get("first_content_delta", 0.0), 4),
+            "t_subagent_result_event": round(result.subagent_breakdown.get("result_event", 0.0), 4),
             "t_subagent_complete": round(result.subagent_breakdown.get("complete", 0.0), 4),
+            "api_ttft_ms": round(result.subagent_breakdown.get("api_ttft_ms", 0.0), 1),
         }
         RECALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with RECALL_LOG_PATH.open("a", encoding="utf-8") as f:
