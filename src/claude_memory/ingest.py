@@ -19,12 +19,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
 from tqdm import tqdm
 
-from .config import DATA_DIR, INGESTION_STATE_FILE, SCHEMA_VERSION
+from .config import DATA_DIR, IN_PROGRESS_DIR, INGESTION_STATE_FILE, SCHEMA_VERSION
 from .extractor import RateLimitError, count_chunks, count_chunks_incremental, extract_trajectories_from_session
 from .index_builder import write_index
 from .keyword_canonicalizer import append_flags, apply_mapping, canonicalize_keywords
@@ -97,6 +98,40 @@ def file_hash(path: Path) -> str:
             f.seek(-TAIL_BYTES, 2)
         tail = f.read()
     return f"{size}:{hashlib.md5(tail).hexdigest()}"
+
+
+def _mark_in_progress(session_id: str) -> None:
+    """Drop a marker file (named after session_id, contents = pid) so other
+    processes can see this session is being ingested right now."""
+    IN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+    (IN_PROGRESS_DIR / session_id).write_text(str(os.getpid()))
+
+
+def _unmark_in_progress(session_id: str) -> None:
+    (IN_PROGRESS_DIR / session_id).unlink(missing_ok=True)
+
+
+def get_in_progress_sessions() -> set[str]:
+    """Return session IDs whose marker file points to a still-alive pid.
+    Cleans up marker files belonging to dead pids as a side effect."""
+    if not IN_PROGRESS_DIR.exists():
+        return set()
+    alive = set()
+    for marker in IN_PROGRESS_DIR.iterdir():
+        try:
+            pid = int(marker.read_text().strip())
+        except (ValueError, FileNotFoundError, OSError):
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(pid, 0)
+            alive.add(marker.name)
+        except ProcessLookupError:
+            marker.unlink(missing_ok=True)
+        except PermissionError:
+            # Pid exists but isn't ours — still alive
+            alive.add(marker.name)
+    return alive
 
 
 def get_pending_sessions(
@@ -240,6 +275,7 @@ async def ingest_all(
                 skipped_for_retry += 1
                 return
             label = f"{session.project}/{session.session_id[:8]}"
+            _mark_in_progress(session.session_id)
             try:
                 # If re-ingesting (full), clear prior data for this session first
                 if old_turn_count == 0 and session.session_id in state:
@@ -313,6 +349,8 @@ async def ingest_all(
             except Exception as e:
                 failed += 1
                 log.exception(f"Failed {label}: {e}")
+            finally:
+                _unmark_in_progress(session.session_id)
 
     await asyncio.gather(*[process(s, otc) for s, otc in pending])
     pbar.close()

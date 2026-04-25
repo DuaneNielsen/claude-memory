@@ -29,12 +29,16 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Check conversation memory status. Returns a summary of the processed store, the "
                 "time since the most recent activity in any Claude Code session file, and a "
-                "per-session table of any conversations that are not yet ingested.\n\n"
+                "per-session table of any conversations that are not yet ingested. Each row's "
+                "status is `new`, `updated`, or `ingesting` — `ingesting` means another "
+                "process is actively working on that session right now, so don't kick off a "
+                "duplicate ingest run for it.\n\n"
                 "The directive: ingest terminated sessions so their content becomes searchable. "
                 "Call this at the start of every new conversation and decide whether to invoke "
                 "ingest_sessions based on what you see — if the last session activity is recent, "
                 "another conversation is likely still in progress and pending entries may not be "
-                "terminated yet."
+                "terminated yet. If everything pending is already `ingesting`, there is nothing "
+                "for you to do."
             ),
             inputSchema={
                 "type": "object",
@@ -227,13 +231,14 @@ def _humanize_age(seconds: float) -> str:
 async def _handle_status() -> list[TextContent]:
     import time
 
-    from .ingest import get_pending_sessions, load_ingestion_state
+    from .ingest import get_in_progress_sessions, get_pending_sessions, load_ingestion_state
     from .parser import discover_sessions
 
     store = get_store()
     state = load_ingestion_state()
     edu_count = store.count()
     pending = get_pending_sessions()
+    in_progress = get_in_progress_sessions()
 
     session_paths = discover_sessions()
     if session_paths:
@@ -248,23 +253,28 @@ async def _handle_status() -> list[TextContent]:
     ]
 
     if pending:
-        new = sum(1 for _, _, otc in pending if otc == 0)
-        continued = len(pending) - new
+        new = sum(1 for path, _, otc in pending if otc == 0 and path.stem not in in_progress)
+        continued = sum(1 for path, _, otc in pending if otc > 0 and path.stem not in in_progress)
+        ingesting = sum(1 for path, _, _ in pending if path.stem in in_progress)
         parts = []
         if new:
             parts.append(f"{new} new")
         if continued:
             parts.append(f"{continued} updated")
+        if ingesting:
+            parts.append(f"{ingesting} ingesting")
         lines.append(f"Pending: {len(pending)} conversations ({', '.join(parts)}) not yet ingested.")
         lines.append("")
-        lines.append(_format_pending_table(pending, state))
+        lines.append(_format_pending_table(pending, state, in_progress))
+    elif in_progress:
+        lines.append(f"All terminated conversations are ingested. {len(in_progress)} actively being processed.")
     else:
         lines.append("All terminated conversations are ingested.")
 
     return [TextContent(type="text", text="\n".join(lines))]
 
 
-def _format_pending_table(pending: list, state: dict) -> str:
+def _format_pending_table(pending: list, state: dict, in_progress: set) -> str:
     from .parser import parse_session_file
 
     rows = []
@@ -278,7 +288,10 @@ def _format_pending_table(pending: list, state: dict) -> str:
         else:
             project = info.get("project") or "(unknown)"
             new_turns = "?"
-        status = "new" if old_turn_count == 0 else "updated"
+        if sid in in_progress:
+            status = "ingesting"
+        else:
+            status = "new" if old_turn_count == 0 else "updated"
         rows.append({
             "id": sid[:8],
             "project": project[:32],
@@ -286,13 +299,14 @@ def _format_pending_table(pending: list, state: dict) -> str:
             "status": status,
         })
 
-    rows.sort(key=lambda r: (0 if r["status"] == "new" else 1, r["id"]))
+    order = {"ingesting": 0, "new": 1, "updated": 2}
+    rows.sort(key=lambda r: (order.get(r["status"], 9), r["id"]))
 
-    header = f"{'session':<10} {'project':<34} {'new turns':>10} {'status':<8}"
+    header = f"{'session':<10} {'project':<34} {'new turns':>10} {'status':<10}"
     sep = "-" * len(header)
     body = [header, sep]
     for r in rows:
-        body.append(f"{r['id']:<10} {r['project']:<34} {str(r['new_turns']):>10} {r['status']:<8}")
+        body.append(f"{r['id']:<10} {r['project']:<34} {str(r['new_turns']):>10} {r['status']:<10}")
     return "\n".join(body)
 
 
