@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -228,27 +230,38 @@ Now process this input:
         prompt = text
 
     t_start = time.monotonic()
-    # Pass the prompt as a positional arg rather than via stdin to avoid the
-    # claude CLI's "no stdin data received in 3s" race under concurrent-process
-    # load (multiple subprocesses fighting for I/O during stage 2).
-    proc = await asyncio.create_subprocess_exec(
-        "claude", "-p",
-        "--model", model,
-        "--tools", "",
-        "--system-prompt", system_prompt,
-        "--json-schema", schema,
-        "--output-format", "json",
-        "--no-session-persistence",
-        prompt,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        # Run from /tmp so cwd-traversal doesn't find ~/CLAUDE.md and inject
-        # it into the LLM's context — the model would otherwise hallucinate
-        # "session" trajectories whose facts actually came from CLAUDE.md.
-        cwd="/tmp",
-    )
-    stdout, stderr = await proc.communicate()
+    # Write the prompt to a temp file and feed it via stdin redirection.
+    # Argv has a per-element ~128KB limit (MAX_ARG_STRLEN) which long
+    # extraction inputs blow through. Avoiding `stdin=PIPE` + `communicate(input=)`
+    # (the obvious alternative) sidesteps the claude CLI's "no stdin data in 3s"
+    # race under concurrent load — the kernel handles the read directly.
+    fd, prompt_path = tempfile.mkstemp(prefix="claude-memory-prompt-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(prompt)
+        with open(prompt_path, "rb") as stdin_file:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p",
+                "--model", model,
+                "--tools", "",
+                "--system-prompt", system_prompt,
+                "--json-schema", schema,
+                "--output-format", "json",
+                "--no-session-persistence",
+                stdin=stdin_file,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                # Run from /tmp so cwd-traversal doesn't find ~/CLAUDE.md and inject
+                # it into the LLM's context — the model would otherwise hallucinate
+                # "session" trajectories whose facts actually came from CLAUDE.md.
+                cwd="/tmp",
+            )
+            stdout, stderr = await proc.communicate()
+    finally:
+        try:
+            os.unlink(prompt_path)
+        except OSError:
+            pass
     elapsed = time.monotonic() - t_start
     stdout_str = stdout.decode()
     stderr_str = stderr.decode()
