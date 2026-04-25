@@ -100,13 +100,18 @@ def file_hash(path: Path) -> str:
 
 
 def get_pending_sessions(
-    projects_dir: Path | None = None, force: bool = False
+    projects_dir: Path | None = None,
+    force: bool = False,
+    exclude: set[str] | None = None,
 ) -> list[tuple[Path, str, int]]:
     """Find sessions that are new or changed without parsing them."""
     state = load_ingestion_state()
     pending = []
+    exclude = exclude or set()
     for path in discover_sessions(projects_dir):
         session_id = path.stem
+        if session_id in exclude:
+            continue
         h = file_hash(path)
         if not force and session_id in state and state[session_id].get("hash") == h:
             continue
@@ -167,13 +172,14 @@ async def ingest_all(
     model: str | None = None,
     force: bool = False,
     concurrency: int = CONCURRENCY,
+    exclude: set[str] | None = None,
 ) -> dict:
     """Run full ingestion pipeline with concurrent LLM calls."""
     mem_store = MemoryStore()
     traj_store = TrajectoryStore()
     state = load_ingestion_state()
 
-    pending_refs = get_pending_sessions(projects_dir, force=force)
+    pending_refs = get_pending_sessions(projects_dir, force=force, exclude=exclude)
 
     if not pending_refs:
         log.info("No new sessions to ingest.")

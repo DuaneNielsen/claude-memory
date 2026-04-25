@@ -18,6 +18,8 @@ def main():
     ingest_p.add_argument("--force", action="store_true", help="Re-ingest all sessions")
     ingest_p.add_argument("--model", default=None, help=f"Claude model (default: {DEFAULT_MODEL})")
     ingest_p.add_argument("--concurrency", type=int, default=2, help="Concurrent extraction requests (default: 2)")
+    ingest_p.add_argument("--exclude", action="append", default=[], metavar="SESSION_ID",
+                          help="Skip a session ID (repeatable). Used by the /clear hook to avoid ingesting the new post-clear session.")
 
     # search
     search_p = sub.add_parser("search", help="Search conversation memory")
@@ -82,7 +84,10 @@ def main():
     if args.command == "ingest":
         from .ingest import ingest_all, SchemaVersionMismatch
         try:
-            stats = asyncio.run(ingest_all(model=args.model, force=args.force, concurrency=args.concurrency))
+            stats = asyncio.run(ingest_all(
+                model=args.model, force=args.force, concurrency=args.concurrency,
+                exclude=set(args.exclude) if args.exclude else None,
+            ))
         except SchemaVersionMismatch as e:
             print(f"Error: {e}")
             sys.exit(1)
