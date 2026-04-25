@@ -27,15 +27,14 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="memory_status",
             description=(
-                "Check conversation memory status — how many sessions are ingested vs pending. "
-                "IMPORTANT: Call this at the START of every new conversation. "
-                "This system extracts discrete facts from past conversations so they can be searched later. "
-                "If a small number of sessions are pending (≤5), silently ingest them in the background "
-                "using the ingest_sessions tool without telling the user. "
-                "If many sessions are pending (>5), tell the user and ask before ingesting — "
-                "explain that you have unprocessed conversations and would like to extract memories from them "
-                "so you can recall past work. Keep it brief and natural. "
-                "If nothing is pending, proceed normally."
+                "Check conversation memory status. Returns a summary of the processed store, the "
+                "time since the most recent activity in any Claude Code session file, and a "
+                "per-session table of any conversations that are not yet ingested.\n\n"
+                "The directive: ingest terminated sessions so their content becomes searchable. "
+                "Call this at the start of every new conversation and decide whether to invoke "
+                "ingest_sessions based on what you see — if the last session activity is recent, "
+                "another conversation is likely still in progress and pending entries may not be "
+                "terminated yet."
             ),
             inputSchema={
                 "type": "object",
@@ -209,16 +208,43 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=wall + footer)]
 
 
+def _humanize_age(seconds: float) -> str:
+    """Format a duration in seconds as 'X seconds/minutes/hours/days ago'."""
+    s = int(seconds)
+    if s < 60:
+        n = max(s, 1)
+        return f"{n} second{'s' if n != 1 else ''} ago"
+    if s < 3600:
+        n = s // 60
+        return f"{n} minute{'s' if n != 1 else ''} ago"
+    if s < 86400:
+        n = s // 3600
+        return f"{n} hour{'s' if n != 1 else ''} ago"
+    n = s // 86400
+    return f"{n} day{'s' if n != 1 else ''} ago"
+
+
 async def _handle_status() -> list[TextContent]:
+    import time
+
     from .ingest import get_pending_sessions, load_ingestion_state
+    from .parser import discover_sessions
 
     store = get_store()
     state = load_ingestion_state()
     edu_count = store.count()
     pending = get_pending_sessions()
 
+    session_paths = discover_sessions()
+    if session_paths:
+        latest_mtime = max(p.stat().st_mtime for p in session_paths)
+        last_session_update_str = _humanize_age(time.time() - latest_mtime)
+    else:
+        last_session_update_str = "no sessions found"
+
     lines = [
         f"Memory store: {edu_count} facts extracted from {len(state)} conversations.",
+        f"Last session activity: {last_session_update_str}.",
     ]
 
     if pending:
@@ -229,12 +255,45 @@ async def _handle_status() -> list[TextContent]:
             parts.append(f"{new} new")
         if continued:
             parts.append(f"{continued} updated")
-        lines.append(f"Pending: {len(pending)} conversations ({', '.join(parts)}) have not been processed yet.")
-        lines.append("Processing extracts searchable facts from past conversations so you can recall prior work.")
+        lines.append(f"Pending: {len(pending)} conversations ({', '.join(parts)}) not yet ingested.")
+        lines.append("")
+        lines.append(_format_pending_table(pending, state))
     else:
-        lines.append("All conversations are up to date.")
+        lines.append("All terminated conversations are ingested.")
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _format_pending_table(pending: list, state: dict) -> str:
+    from .parser import parse_session_file
+
+    rows = []
+    for path, _h, old_turn_count in pending:
+        sid = path.stem
+        info = state.get(sid, {})
+        session = parse_session_file(path)
+        if session:
+            project = session.project
+            new_turns = len(session.turns) - old_turn_count
+        else:
+            project = info.get("project") or "(unknown)"
+            new_turns = "?"
+        status = "new" if old_turn_count == 0 else "updated"
+        rows.append({
+            "id": sid[:8],
+            "project": project[:32],
+            "new_turns": new_turns,
+            "status": status,
+        })
+
+    rows.sort(key=lambda r: (0 if r["status"] == "new" else 1, r["id"]))
+
+    header = f"{'session':<10} {'project':<34} {'new turns':>10} {'status':<8}"
+    sep = "-" * len(header)
+    body = [header, sep]
+    for r in rows:
+        body.append(f"{r['id']:<10} {r['project']:<34} {str(r['new_turns']):>10} {r['status']:<8}")
+    return "\n".join(body)
 
 
 async def _handle_search(arguments: dict) -> list[TextContent]:
