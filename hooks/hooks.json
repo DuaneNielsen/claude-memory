@@ -5,10 +5,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -x \"${CLAUDE_PLUGIN_ROOT}/.venv/bin/python\" || (cd \"${CLAUDE_PLUGIN_ROOT}\" && uv sync --quiet)"
-          },
-          {
-            "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/memory-check-reset.sh"
           },
           {
