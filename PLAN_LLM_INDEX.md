@@ -4,27 +4,48 @@
 
 ## Goal
 
-Replace the deterministic `build_index()` projection with a one-LLM-call distillation step. Pipeline pulls a **wide** slice of the project's distilled data (trajectory summaries, decision/gotcha/preference EDUs, keyword frequencies), feeds it to the strongest available model (Opus), and gets back a curated `ProjectIndex` shaped for SessionStart injection. Acceptable cost trade for materially higher index quality.
+**The index is a catalog, not a digest.** Its job is to advertise to Claude what memories are *available* in the store so he knows what to ask for via `recall_get_context`. The actual content of those memories lives in ChromaDB and is retrieved on demand — it does not need to be pre-injected at SessionStart.
 
-The current builder is a rank-and-truncate over already-extracted facts. It can't synthesize across trajectories ("the user has been moving from FastAPI to Litestar over the last 3 weeks"), can't write a project overview, and can't suppress entries that have been superseded ("EasyEffects removed" appears in Recent Activity even though it's now in CLAUDE.md and irrelevant). An LLM pass fixes all three.
+Replace the deterministic `build_index()` projection with a one-LLM-call curation step. Pipeline pulls a **wide** slice of the project's distilled data (trajectory summaries, decision/gotcha/preference EDUs, keyword frequencies), feeds it to the strongest available model (Opus), and gets back a structured catalog: a project overview, behavior-shaping preferences (these *do* need to be content because Claude can't act on them via a tool call), and inventories that group available memories by topic — counts and keyword groupings, not full EDU text.
+
+The current builder has three problems:
+1. It dumps 8 full-text decision/gotcha EDUs into the system prompt that mostly aren't relevant to the upcoming conversation. Wasted tokens, and worse: it primes Claude on facts that may be superseded, instead of letting him decide what to fetch.
+2. It can't write a project overview or detect active threads.
+3. It can't suppress entries that have been superseded ("EasyEffects removed" appears in Recent Activity even though it's now in CLAUDE.md and irrelevant).
+
+An LLM pass fixes (2) and (3). The catalog reframing fixes (1).
+
+### Content vs reference (the cut)
+
+| Section | Type | Why |
+|---|---|---|
+| `project_overview` | content (~2 sentences) | Claude needs to orient before any tool call; can't be deferred. |
+| `preferences` | content (full EDU text) | These shape behavior — Claude must obey them before he could think to call a tool. Cannot be deferred. |
+| `available_memories` | **reference** (counts + topic groupings) | "23 decisions tagged: pipewire, claude-memory, niri, …" — Claude sees what exists and calls `recall_get_context` to pull what's relevant. |
+| `active_threads` | reference (one-line summaries) | These are pointers to ongoing trajectories. Useful at orient time; full content via recall. |
+| `recent_activity` | reference (one-line trajectory summaries) | Same — already a catalog, no full text. |
+| `keyword_cloud` | reference (keywords only) | **Always present.** Filtered by frequency if too large. Doubles as "here are the topics this project's memory covers." |
 
 ## Design decisions (locked unless flagged 🟡)
 
 ### 1. Input to the LLM (the "wide query")
 
+The LLM needs **wide enough input to group EDUs by topic**, but does NOT need full-text dumps for tags whose output will be a count+topics catalog. So we vary detail by tag:
+
 Per touched-project, gather:
 - **Project metadata**: name, total trajectory count, total EDU count, time range covered.
-- **Trajectory digest**: all trajectories for the project, each as `{id, date, summary, keywords, edu_count}`. Sort newest-first. Cap at 80 (subsample by recency × max-keyword-freq if more).
-- **Selected EDUs verbatim** (full text, with tag and date):
-  - All `preference` EDUs (cap 30)
-  - All `decision` EDUs from the last 90 days (cap 50)
-  - All `gotcha` EDUs from the last 90 days (cap 50)
-  - Top 20 `architecture` EDUs by recency × keyword-freq
+- **Trajectory digest**: all trajectories, each as `{id, date, summary, keywords, edu_count}`. Sort newest-first. Cap at 80 (subsample by recency × max-keyword-freq if more).
+- **Preference EDUs (verbatim)**: ALL preference-tagged EDUs (cap 30). Full text — these may be output verbatim.
+- **Catalog-only EDUs (text + tag + keywords)**: for tags `decision`, `gotcha`, `architecture`, `config`, `project`:
+  - Include `{edu_id, tag, text, keywords-from-trajectory, date}` so the LLM can group by topic.
+  - Cap per tag: 80 most-recent EDUs. (Higher than the digest design's 50 since we're paying for grouping accuracy, not for the LLM to memorize text.)
+  - Old EDUs that don't fit the cap still count toward `available_memories[tag].count` — pass the count separately.
 - **Keyword cloud with frequencies**: full canonical keyword list + occurrence counts.
+- **Per-tag full counts**: `{decision: 47, gotcha: 23, …}` so `available_memories[].count` is accurate even when EDUs are subsampled.
 
-Estimated input: 6–15k tokens for a typical project, capped via subsampling.
+Estimated input: 6–12k tokens for a typical project, capped via subsampling.
 
-🟡 **Open**: should we include a sample of `config` and `project` tagged EDUs? Probably not — they're high-volume noise. Resolve in the first build session by inspecting an actual prompt input dump.
+🟡 **Open**: include `config` and `project` tagged EDUs in the catalog? They tend to be high-volume noise — a "247 config entries" inventory line might be useless. Could exclude or merge into a single "other" tag. Resolve by inspecting an actual prompt input dump in the first build session.
 
 ### 2. Model
 
@@ -38,14 +59,25 @@ Estimated input: 6–15k tokens for a typical project, capped via subsampling.
   "preferences": [
     {"text": "...", "source_edu_ids": ["..."]}
   ],
-  "key_decisions": [
-    {"text": "...", "rationale": "why X over Y", "date": "2026-04-22", "source_edu_ids": ["..."]}
-  ],
-  "key_gotchas": [
-    {"text": "...", "date": "2026-04-15", "source_edu_ids": ["..."]}
+  "available_memories": [
+    {
+      "tag": "decision",
+      "count": 47,
+      "topics": ["pipewire", "claude-memory", "niri", "build-from-source"]
+    },
+    {
+      "tag": "gotcha",
+      "count": 23,
+      "topics": ["pipewire", "niri", "audio"]
+    },
+    {
+      "tag": "architecture",
+      "count": 31,
+      "topics": ["claude-memory", "ingestion", "trajectories"]
+    }
   ],
   "active_threads": [
-    {"summary": "currently mid-...", "last_activity": "2026-04-25", "next_step": "..."}
+    {"summary": "currently mid-...", "keywords": ["..."]}
   ],
   "recent_activity": [
     {"date": "2026-04-26", "summary": "..."}
@@ -55,20 +87,78 @@ Estimated input: 6–15k tokens for a typical project, capped via subsampling.
 ```
 
 Notes:
+- `available_memories` is the catalog/inventory — counts and topic groupings per tag. Claude reads this and calls `recall_get_context` with the relevant `tag` + `topics` if he needs the actual content. **This replaces the old full-text `key_decisions` / `key_gotchas` sections.**
 - `project_overview` and `active_threads` are **new** sections — the deterministic builder can't produce them.
-- `key_decisions` and `key_gotchas` are split (currently they share a single 8-slot section that gotchas dominate).
-- `source_edu_ids` is required for traceability — we want to be able to say "this index claim came from EDUs X, Y, Z" for debugging/auditing. The LLM must select from the EDUs we showed it; this is enforced by the prompt + schema.
-- Caps in the prompt: 8 preferences, 8 decisions, 5 gotchas, 4 active threads, 8 recent activity, 40 keywords.
+- `preferences` is the only section that still includes full EDU text (because preferences shape behavior immediately and can't be deferred to a tool call).
+- `source_edu_ids` is required on `preferences` for traceability. The LLM must select from the EDUs we showed it; enforced by prompt + schema.
+- Caps: 8 preferences, 6 active threads, 10 recent activity, 40 keywords. `available_memories` has one entry per tag (closed set: 6 entries max). No cap on `topics` per tag at this layer — `enforce_token_budget` trims if needed.
+
+### 3a. Rendered markdown
+
+The wrapper text already injected by the SessionStart hook will be expanded to make the catalog framing explicit:
+
+```
+# Conversation memory index — project `<name>`
+
+The sections below catalog what memories are available for this project.
+Most are pointers — call `recall_get_context` (via an Agent/Task subagent)
+to fetch the actual content for any topic of interest.
+
+The "Preferences" section is the exception: those shape behavior and apply
+immediately, so the full text is included.
+
+---
+```
+
+Then the body, e.g.:
+```
+## Project overview
+claude-memory is a local conversation-memory plugin for Claude Code.
+Currently focused on improving the SessionStart index quality (LLM-curated catalog).
+
+## Preferences
+- For 'why did you decide X' questions, dispatch recall_get_context via an Agent.
+- A dedicated CI API key (not the dev's personal key) should be used for CI.
+
+## Memories available (call recall_get_context to retrieve)
+- **47 decisions** across topics: pipewire, claude-memory, niri, build-from-source, …
+- **23 gotchas** across topics: pipewire, niri, audio, …
+- **31 architecture notes** across topics: claude-memory, ingestion, trajectories, …
+- **18 config entries** across topics: pipewire, niri, transcriber, …
+- **12 project notes** across topics: claude-memory, frigate, …
+
+## Active threads
+- LLM-curated index design (claude-memory, index-builder, planning)
+- CI deploy-matrix expansion (claude-memory, ci, docker)
+
+## Recent activity
+- [2026-04-26] Built and validated the claude-memory CI pipeline
+- [2026-04-26] Designed a four-layer GitHub Actions CI pipeline for claude-memory
+- …
+
+## Keyword cloud
+agent-framework, ci, claude-code, claude-memory, chromadb, …
+```
+
+Notice how dramatically smaller this is than the old design's "full text of 8 decisions + 8 gotchas". The whole body for an active project should fit in ~300-400 tokens.
 
 ### 4. Prompt sketch
 
-System prompt should mirror the existing extractor prompts in shape:
-- "CRITICAL SOURCE BOUNDARY" clause: only synthesize from the EDUs and trajectory summaries provided in the user message; do not pull from CLAUDE.md, training, or surrounding files.
-- Section-by-section instructions for what each output field should be (project_overview = "what would a new collaborator need to know in one breath", active_threads = "things still mid-flight, not settled facts", etc.).
-- Quality bar: "prefer specific over general", "name files / functions / paths when relevant", "drop entries that have been superseded by later EDUs", "phrasings should be skimmable in <2s each".
-- One-shot example with worked input/output (using the home project as the example, since it has rich data).
+System prompt should mirror the existing extractor prompts in shape and explicitly state the catalog framing:
 
-Draft a first version, run it on `home` and `projects-claude-memory`, iterate until the output reads well to a human.
+- **Lead with intent**: "You are building a CATALOG of memories available for a project, not a digest of their content. Most output is pointers (counts + topic keywords) so a downstream agent can decide what to fetch via `recall_get_context`. Full content is included ONLY for the `preferences` section because preferences shape behavior immediately."
+- **CRITICAL SOURCE BOUNDARY**: only synthesize from the EDUs and trajectory summaries provided; do not pull from CLAUDE.md, training, or surrounding files.
+- **Section-by-section instructions**:
+  - `project_overview`: 1-2 sentences. What is this project, and what's the current focus? Inferred from the trajectory summaries' temporal pattern.
+  - `preferences`: select up to 8 preference-tagged EDUs that still apply. Drop ones superseded by later EDUs. Keep verbatim text.
+  - `available_memories`: for each tag in {decision, gotcha, architecture, config, project}, group the EDUs of that tag into 3-7 topic clusters. Each cluster = a short keyword (matching the project's canonical keyword cloud where possible). Output the count of EDUs and the topic-cluster keywords. Do NOT include EDU text. Do NOT manufacture topics — every topic keyword must appear in the project's keyword cloud or be a clear merge of two existing keywords.
+  - `active_threads`: trajectories where the most recent EDU suggests the work is still in motion (open questions, "to do", mid-decision phrasings). Up to 6. One-line summary + keywords.
+  - `recent_activity`: top 10 trajectories by recency. One-line summaries (you can use the trajectory's existing summary verbatim or rewrite for clarity).
+  - `keyword_cloud`: the canonical project keywords, alphabetized. Always present even if other sections are empty. Filter to top-40 by frequency if the cloud is larger.
+- **Quality bar**: "Prefer specific over general. Drop entries superseded by later EDUs. Topic keywords in `available_memories` should be the same vocabulary the user uses elsewhere — match the project's keyword cloud."
+- **One-shot example**: worked input/output using `home` or `projects-claude-memory` as the example (whichever has the richest data when we draft).
+
+Draft v1, run on 3 real projects, eyeball output, iterate prompt + one-shot until quality is consistently good.
 
 ### 5. Render path
 
@@ -86,12 +176,18 @@ This makes the LLM call fire only when something genuinely new arrived — typic
 
 ### 7. Cost budget
 
-- Input: ~10k tokens per project per ingest run when there's new content
-- Output: ~600 tokens
-- Per-call cost: rough estimate $0.10–0.20 at current Opus pricing
-- Per-day cost: depends on how many distinct projects get touched per ingest run. Typical ingest touches 1–3 projects → $0.10–$0.60/day for active users.
+The catalog framing dramatically shrinks the OUTPUT (no full-text EDU dumps). Input stays wide — the LLM still needs to see all the EDUs to group them by topic intelligently.
+
+- Input: ~6–12k tokens per project per ingest run when there's new content
+- Output: ~250–400 tokens (was ~600 in the digest design, since most sections are now references not content)
+- Per-call cost: rough estimate $0.05–0.15 at current Opus pricing
+- Per-day cost: typical ingest touches 1–3 projects → $0.05–$0.45/day for active users
 
 If this turns out wrong by 10× we can: (a) downgrade to Sonnet for index curation; (b) reduce the input size cap; (c) re-introduce the deterministic builder as a "no-key" fallback.
+
+### 7a. Token budget at SessionStart
+
+Even more important than $ cost: the index gets injected into every SessionStart in this project, so its size is paid in tokens on every conversation start. The catalog design should land at ~200-400 tokens for typical projects (down from the deterministic builder's 600 budget). Keep `MAX_INDEX_TOKENS = 600` as the hard cap; expect to be well under it.
 
 ### 8. Failure modes & fallbacks
 
@@ -159,10 +255,14 @@ Before merging:
 - Eyeball each rendered index — does it read like a useful one-page brief?
 - Iterate prompt + one-shot until 3 out of 3 read well
 
-### Step 10 — Update docs
+### Step 10 — Update SessionStart hook wrapper text
 
-- `README.md`: update the "How it works" section's mermaid to show the LLM index step.
-- `ARCHITECTURE.md`: section on the index builder.
+`hooks/session_start_index.py` currently wraps the index body with a 5-line generic header. Replace with the catalog-framing wrapper sketched in §3a — the existing wording understates the "this is a catalog, fetch via recall" framing and Claude needs to hear it explicitly to use the index correctly.
+
+### Step 11 — Update docs
+
+- `README.md`: update the "How it works" section's mermaid to show the LLM index step. Update the "What it adds" section to reflect that the SessionStart hook now injects a catalog rather than a digest.
+- `ARCHITECTURE.md`: section on the index builder, with the catalog vs digest framing explained.
 - `PROMPTS.md`: add the new `INDEX_CURATOR_SYSTEM_PROMPT` to Part 1.
 - Delete this `PLAN_LLM_INDEX.md`.
 
