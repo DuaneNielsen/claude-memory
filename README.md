@@ -50,6 +50,26 @@ flowchart TB
 
 Resumed sessions are handled incrementally — existing EDUs are loaded as context, and only new turns are processed.
 
+## What it adds to Claude Code
+
+Installing the plugin registers three MCP tools and two hooks. All run locally; no data leaves your machine except the EDU-extraction calls to the Claude API.
+
+### MCP tools
+
+| Tool | What it does | When to use |
+|---|---|---|
+| `memory_status` | Reports the size of the processed store, time since the last session activity, and a per-session table of conversations not yet ingested (`new`, `updated`, or `ingesting`). | Sanity check at the start of a new conversation. The plugin also calls it for you on `UserPromptSubmit`. |
+| `ingest_sessions` | Processes new or changed Claude Code conversations into searchable memory. Runs the full parse → extract → embed → label pipeline. | When `memory_status` reports unprocessed conversations and you want them searchable. |
+| `recall_get_context` | Searches past Claude Code conversations across all projects and returns a wall of stitched trajectory excerpts matching the query. | When you need the actual content of a past decision/discussion, not just a one-line summary. **Always dispatch via an `Agent`/`Task` subagent** — the wall can be 50-400KB. |
+
+### Hooks (registered automatically)
+
+| Hook | Fires on | What it does |
+|---|---|---|
+| `SessionStart` (default) | Every new conversation | (1) Bootstraps the plugin's `.venv` if missing. (2) Resets the once-per-session prompted-flag. (3) Injects the per-project memory index (one-line summaries) into Claude's context, titled `# Conversation memory index — project <name>`. |
+| `SessionStart` (matcher: `clear`) | `/clear` | Kicks off a fire-and-forget `claude-memory ingest` of all pending sessions, *excluding* the new post-clear session whose ID is in the SessionStart payload. |
+| `UserPromptSubmit` | First user prompt of a session | Calls `memory_status` once, then injects an `additionalContext` directive telling Claude to either silently call `ingest_sessions` (≤5 pending) or surface the count and ask before ingesting (>5 pending). |
+
 ## Install
 
 ```bash
@@ -116,20 +136,6 @@ claude-memory reset --all --state-only  # keep EDUs, clear state (forces re-chec
 # Run MCP server (stdio)
 claude-memory serve
 ```
-
-## MCP server
-
-When installed as a plugin, the MCP server starts automatically and exposes:
-
-- `memory_status` — sanity check at session start; surfaces pending sessions.
-- `ingest_sessions` — process new/changed conversations into searchable memory.
-- `recall_get_context` — given search terms + a question, returns a stitched
-  wall-of-text of relevant past trajectories with neighboring context.
-
-**Dispatch convention for `recall_get_context`:** the wall can be tens of
-kilobytes. The main agent should dispatch the call into an `Agent`/`Task`
-subagent so the wall lives in the subagent's context, not yours, and the
-subagent returns synthesized prose.
 
 ## References
 
