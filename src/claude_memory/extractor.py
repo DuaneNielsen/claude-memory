@@ -540,6 +540,182 @@ LABEL_JSON_SCHEMA = json.dumps({
 })
 
 
+INDEX_CURATOR_SYSTEM_PROMPT = """\
+You are a memory-index curator for a per-project conversation memory system. Your job is to produce a CATALOG of memories available for the project — NOT a digest of their content.
+
+Most of the output is REFERENCES — counts and topic keywords per tag — so a downstream agent can decide what to fetch via the `recall_get_context` MCP tool. Full EDU content is included ONLY for the `preferences` section, because preferences shape behavior immediately and cannot be deferred to a tool call.
+
+CRITICAL SOURCE BOUNDARY: Use ONLY the EDUs and trajectory summaries provided in the user message below. Do NOT pull facts from CLAUDE.md, your training data, or any other context you can see. Every `source_edu_ids` value in `preferences` must reference an `edu_id` that actually appears in the input.
+
+Section-by-section instructions:
+
+- `project_overview`: ONE OR TWO sentences. What is this project, and what's the current focus? Inferred from the trajectory summaries' temporal/topical pattern. If the project's trajectories are too sparse to infer a focus, just describe the project at a high level.
+
+- `preferences`: select up to 8 preference-tagged EDUs that still apply. Drop preferences that have been clearly superseded by a later EDU (e.g. a newer preference that contradicts an older one — keep the newer). Keep the verbatim text of each preference. Each entry MUST include `source_edu_ids` listing the originating preference EDU(s).
+
+- `available_memories`: for each tag in {decision, gotcha, architecture}, group the EDUs of that tag into 3-7 topic clusters. Each cluster = a short keyword string (matching the project's existing keyword cloud where possible). Output the per-tag `count` (use the count given in the input — it is the FULL count, including EDUs not shown in the prompt) and the `topics` cluster keywords. Do NOT include EDU text. Do NOT manufacture topics — every topic keyword must appear in the project's keyword cloud, or be an obvious merge/short-form of one.
+
+- `active_threads`: trajectories where the most recent EDUs suggest the work is still in motion (open questions, "to do", mid-decision phrasings, or simply very recent topics not yet superseded). Up to 6 entries. ONE-LINE summary plus 2-4 keywords each.
+
+- `recent_activity`: the top ~10 trajectories by recency. ONE-LINE summaries (the trajectory's existing `summary` is usually fine to reuse; rewrite for clarity if needed). Each entry MUST include the trajectory's date in YYYY-MM-DD form.
+
+- `keyword_cloud`: the canonical project keywords. Always present even when other sections are empty. Filter to the top ~40 by frequency if the cloud is larger; otherwise list them all. Alphabetize.
+
+Quality bar:
+- Prefer specific over general.
+- Drop entries clearly superseded by later ones.
+- Topic keywords in `available_memories` should match the project's vocabulary — reuse keywords from the cloud rather than inventing synonyms.
+- If a section would be empty (e.g. no preferences, no decisions), emit an empty list — do NOT fabricate filler.
+
+Output as JSON matching the provided schema."""
+
+
+INDEX_CURATOR_JSON_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "project_overview": {"type": "string"},
+        "preferences": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_edu_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["text", "source_edu_ids"],
+            },
+        },
+        "available_memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "topics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["tag", "count", "topics"],
+            },
+        },
+        "active_threads": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["summary", "keywords"],
+            },
+        },
+        "recent_activity": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string"},
+                    "summary": {"type": "string"},
+                },
+                "required": ["date", "summary"],
+            },
+        },
+        "keyword_cloud": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": [
+        "project_overview",
+        "preferences",
+        "available_memories",
+        "active_threads",
+        "recent_activity",
+        "keyword_cloud",
+    ],
+})
+
+
+INDEX_CURATOR_ONE_SHOT_INPUT = """\
+Project: home
+Total trajectories: 14    Total EDUs: 87    Time range: 2026-03-15 to 2026-03-22
+
+Per-tag full counts (these are the totals; some EDUs below may be subsamples):
+  decision: 18    gotcha: 11    architecture: 9
+
+Keyword frequencies (canonical cloud):
+  audio: 9, claude-memory: 4, niri: 5, pipewire: 8, lv2: 3, build-from-source: 2, wayland: 3, easyeffects: 2
+
+Trajectory digest (newest-first; id, date, summary, keywords, edu_count):
+1. [t-aaa, 2026-03-22] Removed EasyEffects after it hijacked playback routing | [audio, easyeffects, pipewire] | 6 EDUs
+2. [t-bbb, 2026-03-22] Built PipeWire LV2 filter-chain module from source because the Ubuntu PPA build omitted it | [pipewire, lv2, build-from-source] | 5 EDUs
+3. [t-ccc, 2026-03-20] Diagnosed xrun on HDMI sink by raising quantum to 2048 | [pipewire, audio] | 7 EDUs
+4. [t-ddd, 2026-03-19] Reorganized niri config for two-monitor layout | [niri, wayland] | 9 EDUs
+... (10 more)
+
+Preference EDUs (verbatim — eligible for `preferences` output):
+- [edu-pref-1, 2026-03-18] When debugging audio, prefer pw-top -b -n 1 over wpctl status — pw-top shows BUSY/ERR per node which wpctl doesn't.
+- [edu-pref-2, 2026-03-15] If pipewire is updated via apt, the custom LV2 filter-chain module rebuild is a manual step — flag it before suggesting an apt upgrade.
+
+Catalog EDUs (text + tag + per-trajectory keywords; capped at 80 per tag):
+[decision]
+- [edu-d-1, 2026-03-22] EasyEffects was removed because it was hijacking all playback into its virtual sink, breaking routing | traj_keywords: [audio, easyeffects, pipewire]
+- [edu-d-2, 2026-03-22] EasyEffects replaced with a native PipeWire filter-chain that only processes mic input | traj_keywords: [audio, easyeffects, pipewire]
+- [edu-d-3, 2026-03-19] Niri layout pinned monitors with explicit positions rather than auto-detect because hot-plug reorder caused workspace shuffles | traj_keywords: [niri, wayland]
+... (15 more)
+[gotcha]
+- [edu-g-1, 2026-03-22] PipeWire's LV2 module is missing from the Ubuntu PPA build and must be compiled from source | traj_keywords: [pipewire, lv2, build-from-source]
+- [edu-g-2, 2026-03-22] If PipeWire is updated via apt, the custom LV2 module rebuild is required | traj_keywords: [pipewire, lv2, build-from-source]
+- [edu-g-3, 2026-03-20] HDMI driver drops to 1024 quantum if min-quantum is lower, causing xruns | traj_keywords: [pipewire, audio]
+... (8 more)
+[architecture]
+- [edu-a-1, 2026-03-22] Mic chain order: Yeti Nano → highpass 80Hz → LSP compressor (-26dB) → de-esser (-24dB) → limiter (-3dB) | traj_keywords: [audio, pipewire]
+- [edu-a-2, 2026-03-19] Niri uses three persistent workspaces per monitor, with the security/camera mpv pinned via custom app-id | traj_keywords: [niri, wayland]
+... (7 more)
+"""
+
+
+INDEX_CURATOR_ONE_SHOT_OUTPUT = json.dumps({
+    "project_overview": "Personal Linux workstation config — currently focused on PipeWire audio routing (replacing EasyEffects with a native filter-chain) and Niri compositor layout tuning.",
+    "preferences": [
+        {
+            "text": "When debugging audio, prefer pw-top -b -n 1 over wpctl status — pw-top shows BUSY/ERR per node which wpctl doesn't.",
+            "source_edu_ids": ["edu-pref-1"],
+        },
+        {
+            "text": "If pipewire is updated via apt, the custom LV2 filter-chain module rebuild is a manual step — flag it before suggesting an apt upgrade.",
+            "source_edu_ids": ["edu-pref-2"],
+        },
+    ],
+    "available_memories": [
+        {"tag": "decision", "count": 18, "topics": ["pipewire", "easyeffects", "niri", "audio"]},
+        {"tag": "gotcha", "count": 11, "topics": ["pipewire", "lv2", "audio"]},
+        {"tag": "architecture", "count": 9, "topics": ["pipewire", "niri", "audio"]},
+    ],
+    "active_threads": [
+        {"summary": "Replacing EasyEffects with a native PipeWire mic filter-chain", "keywords": ["pipewire", "easyeffects", "audio"]},
+        {"summary": "Building PipeWire's LV2 module from source to work around the Ubuntu PPA gap", "keywords": ["pipewire", "lv2", "build-from-source"]},
+    ],
+    "recent_activity": [
+        {"date": "2026-03-22", "summary": "Removed EasyEffects after it hijacked playback routing"},
+        {"date": "2026-03-22", "summary": "Built PipeWire LV2 filter-chain module from source because the Ubuntu PPA build omitted it"},
+        {"date": "2026-03-20", "summary": "Diagnosed xrun on HDMI sink by raising quantum to 2048"},
+        {"date": "2026-03-19", "summary": "Reorganized niri config for two-monitor layout"},
+    ],
+    "keyword_cloud": [
+        "audio", "build-from-source", "claude-memory", "easyeffects", "lv2", "niri", "pipewire", "wayland",
+    ],
+})
+
+
 def _normalize_keyword(kw: str) -> str:
     """Lowercase, trim, collapse whitespace to hyphens."""
     return "-".join(kw.lower().strip().split())

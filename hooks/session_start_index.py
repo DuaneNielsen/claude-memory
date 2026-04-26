@@ -46,16 +46,20 @@ def main() -> int:
             return 0
 
         # Prepend a stable, distinctively titled heading so Claude recognizes
-        # this block as a discrete corpus and not loose context. The heading
-        # is byte-identical across runs so it doesn't break prompt caching.
+        # this block as a discrete corpus and not loose context. The wrapper
+        # text is byte-identical across runs so it doesn't break prompt caching.
+        #
+        # Catalog framing: most sections below are POINTERS, not content. The
+        # full text of past memories lives in the recall store; this index
+        # advertises what's available so Claude knows what to fetch.
         wrapped = (
             f"# Conversation memory index — project `{project}`\n\n"
-            "This is an auto-generated digest of one-line summaries from past "
-            "Claude Code conversations in this project. For deeper queries — "
-            "full stitched excerpts, cross-project searches, or topics not "
-            "summarized below — dispatch the `recall_get_context` MCP tool "
-            "via an Agent/Task subagent (see its tool description for the "
-            "exact pattern).\n\n"
+            "The sections below catalog what memories are available for this "
+            "project. Most are pointers — call the `recall_get_context` MCP "
+            "tool (via an Agent/Task subagent) to fetch the actual content "
+            "for any topic of interest.\n\n"
+            "The **Preferences** section is the exception: those shape "
+            "behavior and apply immediately, so the full text is included.\n\n"
             "---\n\n"
             + content
         )

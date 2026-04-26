@@ -8,7 +8,7 @@ Every LLM prompt the system uses, plus prompts from the research it draws on but
 
 ## Part 1 — Production prompts (in active use)
 
-The ingestion pipeline runs in three stages. Stage 1 extracts EDUs from raw turns. Stage 2 segments those EDUs into topical trajectories by classifying adjacent-pair boundaries. Stage 3 labels each trajectory. There are four prompts total — one per stage, plus a separate incremental variant of stage 1 for resumed sessions.
+The ingestion pipeline runs in three stages. Stage 1 extracts EDUs from raw turns. Stage 2 segments those EDUs into topical trajectories by classifying adjacent-pair boundaries. Stage 3 labels each trajectory. There are four ingest-pipeline prompts — one per stage, plus a separate incremental variant of stage 1 for resumed sessions. A fifth prompt (1.5) runs at the *end* of ingest to curate the per-project SessionStart index from the resulting EDUs and trajectories.
 
 ### 1.1 — Initial EDU extraction (`SYSTEM_PROMPT`)
 
@@ -171,6 +171,54 @@ Output: {"summary": "...", "keywords": ["...", "..."]}
 #### One-shot example
 
 `extractor.py: LABEL_ONE_SHOT_INPUT / LABEL_ONE_SHOT_OUTPUT` (line 513). Same wrap pattern as stage 1.
+
+### 1.5 — Per-project index curation (`INDEX_CURATOR_SYSTEM_PROMPT`)
+
+Runs once per touched project at the end of an ingest run. Builds the markdown body that the SessionStart hook injects into every new conversation in that project. The output is a **catalog**, not a digest — most sections are pointers (counts + topic keywords) so a downstream agent can decide what to fetch via `recall_get_context`. Full content is included only for the `preferences` section, since preferences shape behavior immediately and cannot be deferred to a tool call.
+
+`extractor.py: INDEX_CURATOR_SYSTEM_PROMPT`
+
+```
+You are a memory-index curator for a per-project conversation memory system. Your job is to produce a CATALOG of memories available for the project — NOT a digest of their content.
+
+Most of the output is REFERENCES — counts and topic keywords per tag — so a downstream agent can decide what to fetch via the `recall_get_context` MCP tool. Full EDU content is included ONLY for the `preferences` section, because preferences shape behavior immediately and cannot be deferred to a tool call.
+
+CRITICAL SOURCE BOUNDARY: Use ONLY the EDUs and trajectory summaries provided in the user message below. Do NOT pull facts from CLAUDE.md, your training data, or any other context you can see. Every `source_edu_ids` value in `preferences` must reference an `edu_id` that actually appears in the input.
+
+Section-by-section instructions:
+
+- `project_overview`: ONE OR TWO sentences. What is this project, and what's the current focus? Inferred from the trajectory summaries' temporal/topical pattern. If the project's trajectories are too sparse to infer a focus, just describe the project at a high level.
+
+- `preferences`: select up to 8 preference-tagged EDUs that still apply. Drop preferences that have been clearly superseded by a later EDU (e.g. a newer preference that contradicts an older one — keep the newer). Keep the verbatim text of each preference. Each entry MUST include `source_edu_ids` listing the originating preference EDU(s).
+
+- `available_memories`: for each tag in {decision, gotcha, architecture}, group the EDUs of that tag into 3-7 topic clusters. Each cluster = a short keyword string (matching the project's existing keyword cloud where possible). Output the per-tag `count` (use the count given in the input — it is the FULL count, including EDUs not shown in the prompt) and the `topics` cluster keywords. Do NOT include EDU text. Do NOT manufacture topics — every topic keyword must appear in the project's keyword cloud, or be an obvious merge/short-form of one.
+
+- `active_threads`: trajectories where the most recent EDUs suggest the work is still in motion (open questions, "to do", mid-decision phrasings, or simply very recent topics not yet superseded). Up to 6 entries. ONE-LINE summary plus 2-4 keywords each.
+
+- `recent_activity`: the top ~10 trajectories by recency. ONE-LINE summaries (the trajectory's existing `summary` is usually fine to reuse; rewrite for clarity if needed). Each entry MUST include the trajectory's date in YYYY-MM-DD form.
+
+- `keyword_cloud`: the canonical project keywords. Always present even when other sections are empty. Filter to the top ~40 by frequency if the cloud is larger; otherwise list them all. Alphabetize.
+
+Quality bar:
+- Prefer specific over general.
+- Drop entries clearly superseded by later ones.
+- Topic keywords in `available_memories` should match the project's vocabulary — reuse keywords from the cloud rather than inventing synonyms.
+- If a section would be empty (e.g. no preferences, no decisions), emit an empty list — do NOT fabricate filler.
+
+Output as JSON matching the provided schema.
+```
+
+**Why this shape:**
+- The earlier deterministic builder dumped 8 full-text decision/gotcha EDUs into the system prompt that mostly weren't relevant to the upcoming conversation. Wasted tokens, plus risk of priming Claude on facts that may have been superseded. The catalog framing replaces those full-text dumps with `count + topics` pointers — Claude reads the pointers and calls `recall_get_context` if a topic looks relevant.
+- The `available_memories` clusters require the LLM to see the EDU text (otherwise it can't group by topic) but emit only counts and topic keywords. Output stays tiny (~250–400 tokens) while input is wide (~6–12k tokens) — a deliberate asymmetry, since the SessionStart-injected token cost is paid every conversation.
+- `preferences` keeps full text because preferences are the one section that has to act *before* Claude could think to call a tool. Source-EDU-id traceability is enforced by the schema and validated post-LLM (unknown ids are stripped with a warning).
+- `project_overview` and `active_threads` are sections the deterministic builder simply cannot produce. They depend on synthesizing across trajectory summaries, which is exactly what the LLM is here for.
+
+**Cost gating.** `index_builder.write_index` hashes the input (sorted trajectory IDs + EDU IDs + their texts + per-tag counts) and stores the hash alongside the index as `<project>.md.meta.json`. The Opus call only fires when something genuinely new arrived. Any failure (rate-limit, missing CLI, malformed JSON) falls back to the deterministic builder so the system stays usable offline.
+
+#### One-shot example
+
+`extractor.py: INDEX_CURATOR_ONE_SHOT_INPUT / INDEX_CURATOR_ONE_SHOT_OUTPUT`. Same wrap pattern as stages 1 and 3 — a worked example bracketed by `Here is an example...` / `Now process this input:`. The example uses a synthetic `home`-project slice rich in PipeWire/Niri detail so the model learns the right level of topic-cluster granularity.
 
 ```
 Project: home

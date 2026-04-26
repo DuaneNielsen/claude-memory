@@ -292,12 +292,16 @@ def main():
         if not projects:
             print("No projects found in trajectory store.")
             sys.exit(0)
-        for project in projects:
-            try:
-                path = write_index(project, traj_store=traj_store)
-                print(f"Wrote {path}")
-            except Exception as e:
-                print(f"Failed to build index for {project}: {e}")
+
+        async def _reindex_all():
+            for project in projects:
+                try:
+                    path = await write_index(project, traj_store=traj_store)
+                    print(f"Wrote {path}")
+                except Exception as e:
+                    print(f"Failed to build index for {project}: {e}")
+
+        asyncio.run(_reindex_all())
 
     elif args.command == "serve":
         from .server import main as serve_main

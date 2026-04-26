@@ -361,7 +361,7 @@ async def ingest_all(
     indices_written = 0
     for project in sorted(touched_projects):
         try:
-            path = write_index(project, traj_store=traj_store, mem_store=mem_store)
+            path = await write_index(project, traj_store=traj_store, mem_store=mem_store)
             indices_written += 1
             log.info(f"Rebuilt index for {project} -> {path}")
         except Exception as e:

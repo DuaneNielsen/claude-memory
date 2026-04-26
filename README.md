@@ -15,17 +15,17 @@ flowchart TB
       P["Parse turns"]
       E["Extract EDUs<br/>(atomic facts via Claude API)"]
       EM["Embed<br/>nomic-embed-text-v1.5 · 768d"]
-      IX["Per-project index<br/>(one-line summaries)"]
+      IX["LLM-curated project catalog<br/>(Opus · counts + topics + active threads)"]
       P --> E --> EM
       E --> IX
     end
 
     DB[("ChromaDB<br/>cosine + recency decay")]
-    INDEX[("indices/&lt;project&gt;.md")]
+    INDEX[("indices/&lt;project&gt;.md<br/>+ .meta.json hash")]
 
     subgraph READ["Read path (in a new session)"]
       direction TB
-      H1["SessionStart hook<br/>injects index into context"]
+      H1["SessionStart hook<br/>injects catalog into context"]
       MS["MCP: memory_status<br/>(pending/ingesting summary)"]
       RC["MCP: recall_get_context<br/>(stitched excerpts, via subagent)"]
     end
@@ -66,7 +66,7 @@ Installing the plugin registers three MCP tools and two hooks. All run locally; 
 
 | Hook | Fires on | What it does |
 |---|---|---|
-| `SessionStart` (default) | Every new conversation | (1) Bootstraps the plugin's `.venv` if missing. (2) Resets the once-per-session prompted-flag. (3) Injects the per-project memory index (one-line summaries) into Claude's context, titled `# Conversation memory index — project <name>`. |
+| `SessionStart` (default) | Every new conversation | (1) Bootstraps the plugin's `.venv` if missing. (2) Resets the once-per-session prompted-flag. (3) Injects the per-project memory **catalog** (project overview + preferences + available-memory counts + active threads + recent activity + keyword cloud) into Claude's context, titled `# Conversation memory index — project <name>`. The catalog advertises what's available; full content is fetched on demand via `recall_get_context`. |
 | `SessionStart` (matcher: `clear`) | `/clear` | Kicks off a fire-and-forget `claude-memory ingest` of all pending sessions, *excluding* the new post-clear session whose ID is in the SessionStart payload. |
 | `UserPromptSubmit` | First user prompt of a session | Calls `memory_status` once, then injects an `additionalContext` directive telling Claude to either silently call `ingest_sessions` (≤5 pending) or surface the count and ask before ingesting (>5 pending). |
 

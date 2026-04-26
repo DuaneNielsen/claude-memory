@@ -186,6 +186,33 @@ After initial bulk ingestion, new sessions need to be indexed.
 - Process only new content
 - Can be triggered manually or via a hook/cron
 
+### 7. Project Index (`index_builder.py`)
+
+Per-project markdown digest, written to `~/.local/share/claude-memory/indices/<project>.md` and injected at SessionStart by the `session_start_index.py` hook. One file per project.
+
+**Catalog, not digest.** The index advertises *what memories exist* for the project so Claude knows what to ask for via `recall_get_context`. It does NOT pre-load the content of those memories into the system prompt — that would be wasted tokens (most aren't relevant to the upcoming conversation) and would prime Claude with potentially-superseded facts. The actual EDU text lives in ChromaDB and is fetched on demand.
+
+The one exception is the **Preferences** section: those shape behavior immediately and can't be deferred to a tool call, so the full text is included verbatim.
+
+**Section content vs reference cut:**
+
+| Section | Type | Why |
+|---|---|---|
+| `project_overview` | content (~2 sentences) | Claude needs to orient before any tool call |
+| `preferences` | content (full EDU text) | Shape behavior immediately; cannot be deferred |
+| `available_memories` | reference (counts + topics) | "23 decisions tagged: pipewire, niri, …" — Claude calls `recall_get_context` if a topic looks relevant |
+| `active_threads` | reference (one-line summaries) | Pointers to ongoing trajectories |
+| `recent_activity` | reference (one-line trajectory summaries) | Already a catalog format |
+| `keyword_cloud` | reference (keywords only) | Always present — also the topic-coverage hint |
+
+**Two builders:**
+1. **`curate_index_with_llm` (Opus, primary)** — sees a wide slice of the project's distilled data (trajectory digest, all preference EDUs verbatim, decision/gotcha/architecture EDUs capped at 80/tag, keyword frequencies, full per-tag counts) and emits a structured `CuratedIndex` that the renderer turns into markdown. Catches superseded preferences, writes a `project_overview`, and groups the per-tag EDUs into topic clusters.
+2. **`_build_index_deterministic` (no LLM, fallback)** — the original keyword-frequency-ranked builder. Runs unconditionally if the LLM call fails (rate-limit, missing CLI, malformed JSON), so the system stays usable offline.
+
+**Hash gating.** `write_index` hashes the `IndexInput` (sorted trajectory IDs + summaries + EDU IDs + texts + per-tag counts). If the hash matches `<project>.md.meta.json`, no LLM call fires — the existing index file is reused as-is. The Opus call only runs when something genuinely new arrived. Per-call cost: ~$0.05–0.15 with input ~6–12k tokens, output ~250–400 tokens.
+
+**Token budget.** The injected wrapper text is byte-stable so prompt-cache hits still work for the framing; only the body changes when the index rebuilds. `enforce_token_budget_curated` defensively trims sections in priority order (`keyword_cloud → recent_activity → available_memories → active_threads → preferences → project_overview`) until the body fits `MAX_INDEX_TOKENS = 600`. The catalog framing typically lands well under that.
+
 ## Directory Structure
 
 ```

@@ -18,6 +18,12 @@ KEYWORD_FLAG_THRESHOLD = 0.75  # below this → accept as new keyword
 # Claude model for EDU extraction
 DEFAULT_MODEL = "sonnet"
 
+# Claude model for the LLM-curated SessionStart index. The catalog framing
+# requires synthesizing across all of a project's trajectories + EDUs, which
+# is the kind of wide-context task Opus is meaningfully better at. Falls back
+# to the deterministic builder if the call fails (see index_builder.build_index).
+INDEX_CURATOR_MODEL = "opus"
+
 # Embedding model
 EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 
