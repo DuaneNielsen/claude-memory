@@ -1,5 +1,7 @@
 # claude-memory
 
+> 📖 Background reading: [The Building Blocks of an Agent Memory System](https://proximal.hashnode.dev/the-building-blocks-of-an-agent-memory-system)
+
 Local conversation memory for Claude Code. Parses JSONL session files, extracts atomic facts (EDUs) via the Claude API, embeds them in ChromaDB, and exposes semantic search through an MCP server.
 
 ## How it works
