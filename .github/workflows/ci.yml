@@ -15,7 +15,7 @@ jobs:
     name: Layer 1 — static manifest validation
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run static validator
         run: python3 tests/static_check.py
 
@@ -24,9 +24,9 @@ jobs:
     runs-on: ubuntu-24.04
     needs: static
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v8
       - name: Set up Python 3.13
         run: uv python install 3.13
       - name: Sync deps (with dev extras)
@@ -45,7 +45,7 @@ jobs:
       matrix:
         distro: [ubuntu24, fedora]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build deploy image
         run: |
           docker build \
