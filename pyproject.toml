@@ -15,6 +15,16 @@ dependencies = [
     "einops>=0.8.2",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [project.scripts]
 claude-memory = "claude_memory.cli:main"
 

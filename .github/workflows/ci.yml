@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# No ANTHROPIC_API_KEY anywhere in this workflow — every layer here is keyless.
+# The end-to-end Claude-driven test (when added) belongs in a separate workflow
+# gated to push:master and workflow_dispatch.
+
+jobs:
+  static:
+    name: Layer 1 — static manifest validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run static validator
+        run: python3 tests/static_check.py
+
+  smoke:
+    name: Layer 3 — MCP + hook smoke
+    runs-on: ubuntu-24.04
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+      - name: Sync deps (with dev extras)
+        run: uv sync --extra dev --frozen
+      - name: Run smoke tests
+        run: .venv/bin/pytest tests/smoke -v
+
+  deploy-matrix:
+    name: Layer 4 — deploy probe (${{ matrix.distro }})
+    runs-on: ubuntu-24.04
+    needs: smoke
+    # Matrix is expensive (~7min/row); only run on master pushes and manual dispatch.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [ubuntu24, fedora]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build deploy image
+        run: |
+          docker build \
+            -t claude-memory-deploy:${{ matrix.distro }} \
+            -f tests/deploy/Dockerfile.${{ matrix.distro }} \
+            .
+      - name: Run deploy probe inside container
+        run: docker run --rm claude-memory-deploy:${{ matrix.distro }}

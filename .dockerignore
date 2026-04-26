@@ -1,0 +1,16 @@
+# Keep the build context lean — and never ship the host venv into a container.
+.venv/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+.git/
+.github/
+benchmarks/data/
+.claude/
+
+# Plans / scratch — not needed for deploy probe.
+PLAN*.md
+PROMPTS.md
+PAPERS.md
+compare_models.py

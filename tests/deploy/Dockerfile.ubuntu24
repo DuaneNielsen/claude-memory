@@ -1,0 +1,24 @@
+# Layer 4 deploy probe: Ubuntu 24.04 + uv-managed Python 3.13.
+#
+# Build context must be the repo root:
+#   docker build -t claude-memory-deploy:ubuntu24 -f tests/deploy/Dockerfile.ubuntu24 .
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_PROJECT_ENVIRONMENT=/plugin/.venv \
+    PATH=/root/.local/bin:/plugin/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl jq git \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv: pinned tarball install (no curl|sh shell pipe, no network on every layer rebuild).
+RUN curl -fsSL https://astral.sh/uv/install.sh | sh
+
+WORKDIR /plugin
+COPY . /plugin
+
+RUN uv python install 3.13 \
+ && uv sync --extra dev --frozen
+
+CMD ["bash", "tests/deploy/run_in_container.sh"]

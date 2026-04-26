@@ -1,0 +1,25 @@
+# Layer 4 deploy probe: Fedora latest + uv-managed Python 3.13.
+#
+# Fedora ships a recent Python but we still let uv resolve it for parity with
+# the Ubuntu image and to prove the install path doesn't depend on the host
+# Python version.
+#
+# Build context must be the repo root:
+#   docker build -t claude-memory-deploy:fedora -f tests/deploy/Dockerfile.fedora .
+FROM fedora:latest
+
+ENV UV_PROJECT_ENVIRONMENT=/plugin/.venv \
+    PATH=/root/.local/bin:/plugin/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+RUN dnf -y install ca-certificates curl jq git \
+ && dnf clean all
+
+RUN curl -fsSL https://astral.sh/uv/install.sh | sh
+
+WORKDIR /plugin
+COPY . /plugin
+
+RUN uv python install 3.13 \
+ && uv sync --extra dev --frozen
+
+CMD ["bash", "tests/deploy/run_in_container.sh"]
