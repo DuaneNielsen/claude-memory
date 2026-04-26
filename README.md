@@ -6,6 +6,43 @@ Local conversation memory for Claude Code. Parses JSONL session files, extracts 
 
 ## How it works
 
+```mermaid
+flowchart TB
+    S["Claude Code session<br/>~/.claude/projects/*.jsonl"]
+
+    subgraph WRITE["Ingest pipeline"]
+      direction TB
+      P["Parse turns"]
+      E["Extract EDUs<br/>(atomic facts via Claude API)"]
+      EM["Embed<br/>nomic-embed-text-v1.5 · 768d"]
+      IX["Per-project index<br/>(one-line summaries)"]
+      P --> E --> EM
+      E --> IX
+    end
+
+    DB[("ChromaDB<br/>cosine + recency decay")]
+    INDEX[("indices/&lt;project&gt;.md")]
+
+    subgraph READ["Read path (in a new session)"]
+      direction TB
+      H1["SessionStart hook<br/>injects index into context"]
+      MS["MCP: memory_status<br/>(pending/ingesting summary)"]
+      RC["MCP: recall_get_context<br/>(stitched excerpts, via subagent)"]
+    end
+
+    C(["Active Claude conversation"])
+
+    S --> P
+    EM --> DB
+    IX --> INDEX
+    INDEX --> H1
+    S --> MS
+    DB --> RC
+    H1 --> C
+    MS --> C
+    RC --> C
+```
+
 1. **Parse** — reads Claude Code session files from `~/.claude/projects/`
 2. **Extract** — sends conversation turns to the Claude API (via `claude` CLI) which decomposes them into Elementary Discourse Units (EDUs) — self-contained atomic facts
 3. **Embed** — encodes EDUs with `nomic-ai/nomic-embed-text-v1.5` (768d) and stores them in ChromaDB with cosine similarity
