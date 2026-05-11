@@ -146,6 +146,18 @@ The EDU extraction approach is based on **EMem** ("A Simple Yet Strong Baseline 
 - ChromaDB: `~/.local/share/claude-memory/chromadb/`
 - Ingestion state: `~/.local/share/claude-memory/ingested_sessions.json`
 
+## Excluding a project from ingestion
+
+Drop a `.no-memory-ingest` file in the project directory you want to skip:
+
+```bash
+touch ~/path/to/noisy-project/.no-memory-ingest
+```
+
+Any session whose recorded cwd is under that directory is skipped on subsequent ingests. Already-ingested EDUs/trajectories from that project are left in place — the marker only stops *future* ingestion.
+
+As a fallback, the marker is also honored if placed in the Claude state directory (`~/.claude/projects/<slug>/.no-memory-ingest`), for cases where the source dir is gone.
+
 ## Session retention
 
 Claude Code deletes sessions older than 30 days by default. To keep history longer, add to `~/.claude/settings.json`:

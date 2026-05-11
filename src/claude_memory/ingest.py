@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from tqdm import tqdm
@@ -85,6 +86,50 @@ def save_ingestion_state(state: dict) -> None:
 
 TAIL_BYTES = 128
 
+EXCLUDE_MARKER = ".no-memory-ingest"
+
+
+@lru_cache(maxsize=None)
+def _resolve_source_cwd(slug_dir: str) -> str | None:
+    """Find the recorded cwd for a Claude session directory by peeking at any
+    session's JSONL. The cwd is stable per slug-dir (the slug is derived from
+    it), so one resolution covers every session in the directory.
+    """
+    for jsonl in Path(slug_dir).glob("*.jsonl"):
+        try:
+            with open(jsonl) as f:
+                for _ in range(30):
+                    line = f.readline()
+                    if not line:
+                        break
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    cwd = msg.get("cwd")
+                    if cwd:
+                        return cwd
+        except OSError:
+            continue
+    return None
+
+
+def project_is_excluded(session_path: Path) -> bool:
+    """Skip a session if an exclude marker is present in either:
+      - the source project directory (the cwd Claude was launched from), or
+      - the Claude state directory (`~/.claude/projects/<slug>/`) next to the JSONLs.
+
+    The source-dir form is the user-facing path: drop `.no-memory-ingest` into
+    the project you don't want ingested.
+    """
+    slug_dir = session_path.parent
+    if (slug_dir / EXCLUDE_MARKER).exists():
+        return True
+    cwd = _resolve_source_cwd(str(slug_dir))
+    if cwd and (Path(cwd) / EXCLUDE_MARKER).exists():
+        return True
+    return False
+
 
 def file_hash(path: Path) -> str:
     """Signature for append-only JSONL sessions: size + md5 of last TAIL_BYTES.
@@ -146,6 +191,8 @@ def get_pending_sessions(
     for path in discover_sessions(projects_dir):
         session_id = path.stem
         if session_id in exclude:
+            continue
+        if project_is_excluded(path):
             continue
         h = file_hash(path)
         if not force and session_id in state and state[session_id].get("hash") == h:
