@@ -25,6 +25,12 @@ from .parser import Session, Turn
 
 log = logging.getLogger(__name__)
 
+# Dedicated cwd for `claude -p` extractor subprocesses. Any session JSONLs that
+# leak through despite --no-session-persistence land in
+# ~/.claude/projects/-tmp-claude-memory-extract/ and are skipped at ingest time.
+_EXTRACTOR_CWD = "/tmp/claude-memory-extract"
+os.makedirs(_EXTRACTOR_CWD, exist_ok=True)
+
 
 class EDUTag(str, Enum):
     DECISION = "decision"          # architectural/design choices and their rationale
@@ -251,10 +257,13 @@ Now process this input:
                 stdin=stdin_file,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                # Run from /tmp so cwd-traversal doesn't find ~/CLAUDE.md and inject
-                # it into the LLM's context — the model would otherwise hallucinate
-                # "session" trajectories whose facts actually came from CLAUDE.md.
-                cwd="/tmp",
+                # Run from a dedicated subdir so cwd-traversal doesn't find
+                # ~/CLAUDE.md AND so any session JSONLs that leak through despite
+                # --no-session-persistence land in a uniquely-named slug
+                # (~/.claude/projects/-tmp-claude-memory-extract/) we can
+                # hard-exclude from re-ingestion. Plain /tmp would conflate
+                # with the user's own /tmp Claude work.
+                cwd=_EXTRACTOR_CWD,
             )
             stdout, stderr = await proc.communicate()
     finally:

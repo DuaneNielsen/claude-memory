@@ -88,6 +88,11 @@ TAIL_BYTES = 128
 
 EXCLUDE_MARKER = ".no-memory-ingest"
 
+# Slug for the extractor's own subprocess cwd (set in extractor._EXTRACTOR_CWD).
+# Any session JSONL that lands here was produced by claude-memory's own
+# `claude -p` calls leaking past --no-session-persistence — never re-ingest.
+_EXTRACTOR_SLUG = "-tmp-claude-memory-extract"
+
 
 @lru_cache(maxsize=None)
 def _resolve_source_cwd(slug_dir: str) -> str | None:
@@ -191,6 +196,8 @@ def get_pending_sessions(
     for path in discover_sessions(projects_dir):
         session_id = path.stem
         if session_id in exclude:
+            continue
+        if path.parent.name == _EXTRACTOR_SLUG:
             continue
         if project_is_excluded(path):
             continue
