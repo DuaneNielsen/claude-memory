@@ -89,20 +89,15 @@ def test_session_start_index_emits_context_when_index_exists(tmp_path):
     assert "smoke-test marker" in additional
 
 
-def test_memory_check_reset_clears_flag(tmp_path):
-    flag = Path("/tmp/claude-memory-prompted")
-    flag.touch()
-    _run(["bash", str(HOOKS / "memory-check-reset.sh")])
-    assert not flag.exists(), "reset hook did not delete the prompted-flag file"
-
-
-def test_memory_check_early_exit_when_already_prompted(tmp_path):
-    flag = Path("/tmp/claude-memory-prompted")
+def test_memory_check_early_exit_when_session_already_prompted(tmp_path):
+    sid = "smoke-test-session-abc"
+    flag = Path(f"/tmp/claude-memory-prompted-{sid}")
     flag.touch()
     try:
         cp = _run(
             ["bash", str(HOOKS / "memory-check.sh")],
             env={"CLAUDE_PLUGIN_ROOT": str(REPO)},
+            stdin=json.dumps({"session_id": sid}),
         )
         assert cp.stdout.strip() == "", f"expected early exit with no output, got: {cp.stdout!r}"
     finally:
@@ -110,16 +105,19 @@ def test_memory_check_early_exit_when_already_prompted(tmp_path):
 
 
 def test_memory_check_silent_when_zero_pending(tmp_path):
-    # Clear flag; point HOME at empty dir so get_pending_sessions sees zero.
-    Path("/tmp/claude-memory-prompted").unlink(missing_ok=True)
-    cp = _run(
-        ["bash", str(HOOKS / "memory-check.sh")],
-        env={"CLAUDE_PLUGIN_ROOT": str(REPO), "HOME": str(tmp_path)},
-    )
-    # 0 pending → no JSON emitted (only the >0 branches print).
-    assert cp.stdout.strip() == "", f"expected no output for 0 pending, got: {cp.stdout!r}"
-    # Cleanup the flag the hook just created.
-    Path("/tmp/claude-memory-prompted").unlink(missing_ok=True)
+    sid = "smoke-test-session-zero-pending"
+    flag = Path(f"/tmp/claude-memory-prompted-{sid}")
+    flag.unlink(missing_ok=True)
+    try:
+        cp = _run(
+            ["bash", str(HOOKS / "memory-check.sh")],
+            env={"CLAUDE_PLUGIN_ROOT": str(REPO), "HOME": str(tmp_path)},
+            stdin=json.dumps({"session_id": sid}),
+        )
+        # 0 pending → no JSON emitted (only the >0 branches print).
+        assert cp.stdout.strip() == "", f"expected no output for 0 pending, got: {cp.stdout!r}"
+    finally:
+        flag.unlink(missing_ok=True)
 
 
 def test_clear_ingest_early_exit_without_session_id(tmp_path):

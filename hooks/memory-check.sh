@@ -1,11 +1,26 @@
 #!/bin/bash
-# Only fire once per session
-if [ -f /tmp/claude-memory-prompted ]; then
-    exit 0
-fi
-touch /tmp/claude-memory-prompted
+# UserPromptSubmit hook: once per Claude session, nudge the model to call
+# ingest_sessions if there are unprocessed conversations.
+#
+# Per-session state via /tmp/claude-memory-prompted-<session_id>. Earlier
+# versions used a single /tmp/claude-memory-prompted file that was machine-
+# uptime-scoped — once set by one session it silently muted every other
+# concurrent session until reboot. Keying by session_id keeps the
+# "nudge once per session" semantics that the rest of the plugin assumes
+# without cross-contaminating concurrent Claudes.
 
-# Check if ingestion is already running
+PAYLOAD=$(cat)
+SID=$(echo "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null)
+
+if [ -n "$SID" ]; then
+    FLAG="/tmp/claude-memory-prompted-${SID}"
+    if [ -f "$FLAG" ]; then
+        exit 0
+    fi
+    touch "$FLAG"
+fi
+
+# Don't nudge while an ingest is already in flight
 if pgrep -f "claude_memory.cli ingest" > /dev/null 2>&1; then
     exit 0
 fi
