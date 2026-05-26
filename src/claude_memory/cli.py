@@ -63,6 +63,33 @@ def main():
     # serve (MCP server)
     sub.add_parser("serve", help="Run MCP server (stdio)")
 
+    # watcher (long-lived ingestion daemon, run under systemd)
+    watcher_p = sub.add_parser(
+        "watcher",
+        help="Run the background ingestion watcher (inotify + debounced sweep)",
+    )
+    watcher_p.add_argument(
+        "--quiet-seconds", type=int, default=45,
+        help="Seconds of JSONL inactivity required before triggering a sweep (default: 45)",
+    )
+    watcher_p.add_argument(
+        "--once", action="store_true",
+        help="Run a single sweep and exit (testing).",
+    )
+
+    # service (install/uninstall the systemd user unit)
+    service_p = sub.add_parser(
+        "service", help="Manage the systemd --user watcher service",
+    )
+    service_sub = service_p.add_subparsers(dest="service_action")
+    service_sub.add_parser("install", help="Install + enable + start the service")
+    service_sub.add_parser("uninstall", help="Stop + disable + remove the service")
+    service_sub.add_parser("status", help="Show service status (systemctl --user status)")
+    service_sub.add_parser("start", help="Start the service")
+    service_sub.add_parser("stop", help="Stop the service")
+    service_sub.add_parser("restart", help="Restart the service")
+    service_sub.add_parser("logs", help="Tail service logs (journalctl --user -f)")
+
     args = parser.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -306,6 +333,30 @@ def main():
     elif args.command == "serve":
         from .server import main as serve_main
         serve_main()
+
+    elif args.command == "watcher":
+        from .watcher import run as run_watcher
+        sys.exit(run_watcher(quiet_seconds=args.quiet_seconds, once=args.once))
+
+    elif args.command == "service":
+        from . import service
+        if args.service_action == "install":
+            sys.exit(service.install())
+        elif args.service_action == "uninstall":
+            sys.exit(service.uninstall())
+        elif args.service_action == "status":
+            sys.exit(service.status())
+        elif args.service_action == "start":
+            sys.exit(service.start())
+        elif args.service_action == "stop":
+            sys.exit(service.stop())
+        elif args.service_action == "restart":
+            sys.exit(service.restart())
+        elif args.service_action == "logs":
+            sys.exit(service.logs())
+        else:
+            service_p.print_help()
+            sys.exit(1)
 
     else:
         parser.print_help()

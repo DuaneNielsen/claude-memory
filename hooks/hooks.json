@@ -8,25 +8,6 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start_index.py\""
           }
         ]
-      },
-      {
-        "matcher": "clear",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/clear_ingest.sh"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/memory-check.sh"
-          }
-        ]
       }
     ]
   }

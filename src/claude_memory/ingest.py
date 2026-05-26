@@ -30,7 +30,7 @@ from .config import DATA_DIR, IN_PROGRESS_DIR, INGESTION_STATE_FILE, SCHEMA_VERS
 from .extractor import RateLimitError, count_chunks, count_chunks_incremental, extract_trajectories_from_session
 from .index_builder import write_index
 from .keyword_canonicalizer import append_flags, apply_mapping, canonicalize_keywords
-from .parser import Session, discover_sessions, parse_session_file
+from .parser import Session, _clean_project_name, discover_sessions, parse_session_file
 from .store import MemoryStore
 from .trajectories import Trajectory, TrajectoryStore
 
@@ -274,13 +274,34 @@ async def ingest_all(
         log.info("No new sessions to ingest.")
         return {"sessions": 0, "trajectories": 0, "edus": 0}
 
-    # Parse sessions now that we're actually ingesting
+    # Parse sessions now that we're actually ingesting. Sessions with no
+    # user/assistant turns (e.g. stub files containing only an `ai-title`
+    # record) still get a state entry written so they don't re-appear as
+    # pending on every status check. If the file later gains real content,
+    # its hash changes and it'll be picked up.
     pending: list[tuple[Session, int]] = []
+    empty_sessions = 0
     for path, h, old_turn_count in pending_refs:
         session = parse_session_file(path)
         if session:
             session.file_hash = h
             pending.append((session, old_turn_count))
+        else:
+            state[path.stem] = {
+                "file_path": str(path),
+                "hash": h,
+                "edu_count": 0,
+                "trajectory_count": 0,
+                "turn_count": 0,
+                "project": _clean_project_name(path.parent.name),
+                "timestamp": None,
+                "partial": False,
+            }
+            empty_sessions += 1
+
+    if empty_sessions:
+        save_ingestion_state(state)
+        log.info(f"Marked {empty_sessions} empty session(s) processed (no turns to ingest).")
 
     if not pending:
         log.info("No parseable sessions to ingest.")

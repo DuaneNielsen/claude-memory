@@ -27,18 +27,14 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="memory_status",
             description=(
-                "Check conversation memory status. Returns a summary of the processed store, the "
-                "time since the most recent activity in any Claude Code session file, and a "
-                "per-session table of any conversations that are not yet ingested. Each row's "
-                "status is `new`, `updated`, or `ingesting` — `ingesting` means another "
-                "process is actively working on that session right now, so don't kick off a "
-                "duplicate ingest run for it.\n\n"
-                "The directive: ingest terminated sessions so their content becomes searchable. "
-                "Call this at the start of every new conversation and decide whether to invoke "
-                "ingest_sessions based on what you see — if the last session activity is recent, "
-                "another conversation is likely still in progress and pending entries may not be "
-                "terminated yet. If everything pending is already `ingesting`, there is nothing "
-                "for you to do."
+                "Check conversation memory status. Returns: store summary, time since the most "
+                "recent activity in any Claude Code session file, watcher service health, and a "
+                "per-session table of conversations not yet ingested. Each row's status is "
+                "`new`, `updated`, or `ingesting`.\n\n"
+                "Ingestion is handled by the background `claude-memory.service` systemd unit. "
+                "If the service is active, pending sessions will drain automatically once their "
+                "JSONLs go quiet — no action needed from you. If the service is inactive, tell "
+                "the user to run `claude-memory service install` (or `start`) to enable it."
             ),
             inputSchema={
                 "type": "object",
@@ -124,29 +120,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["search_terms", "question"],
             },
         ),
-        Tool(
-            name="ingest_sessions",
-            description=(
-                "Process new or changed Claude Code conversations into searchable memory. "
-                "Extracts discrete facts from conversations and stores them for later recall. "
-                "For ≤5 pending conversations, call this silently in the background. "
-                "For more, ask the user first."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "model": {
-                        "type": "string",
-                        "description": "Claude model to use for extraction (default: sonnet)",
-                    },
-                    "force": {
-                        "type": "boolean",
-                        "description": "Re-ingest all sessions from scratch (default: false)",
-                        "default": False,
-                    },
-                },
-            },
-        ),
     ]
 
 
@@ -158,8 +131,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return await _handle_search(arguments)
     elif name == "recall_get_context":
         return await _handle_recall(arguments)
-    elif name == "ingest_sessions":
-        return await _handle_ingest(arguments)
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
@@ -233,12 +204,14 @@ async def _handle_status() -> list[TextContent]:
 
     from .ingest import get_in_progress_sessions, get_pending_sessions, load_ingestion_state
     from .parser import discover_sessions
+    from .service import is_active as service_is_active
 
     store = get_store()
     state = load_ingestion_state()
     edu_count = store.count()
     pending = get_pending_sessions()
     in_progress = get_in_progress_sessions()
+    service_active = service_is_active()
 
     session_paths = discover_sessions()
     if session_paths:
@@ -247,9 +220,17 @@ async def _handle_status() -> list[TextContent]:
     else:
         last_session_update_str = "no sessions found"
 
+    service_line = (
+        "Watcher service: active (sessions will be ingested automatically after they go quiet)."
+        if service_active else
+        "Watcher service: INACTIVE — ingestion will not happen until the user runs "
+        "`claude-memory service install` (or `start`)."
+    )
+
     lines = [
         f"Memory store: {edu_count} facts extracted from {len(state)} conversations.",
         f"Last session activity: {last_session_update_str}.",
+        service_line,
     ]
 
     if pending:
@@ -344,71 +325,6 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
         lines.append(f"{i}. [{r.project}, {date}] {r.text}")
         lines.append(f"   (similarity={r.similarity:.3f}, recency={r.recency_weight:.3f}, score={r.score:.3f})")
         lines.append("")
-
-    return [TextContent(type="text", text="\n".join(lines))]
-
-
-async def _handle_ingest(arguments: dict) -> list[TextContent]:
-    import subprocess
-    from pathlib import Path
-
-    # Check if ingestion is already running
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "claude_memory.cli ingest"],
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            return [TextContent(type="text", text="Ingestion is already running in the background. No action needed.")]
-    except Exception:
-        pass
-
-    model = arguments.get("model")
-    force = arguments.get("force", False)
-
-    # Find the python executable in our venv
-    venv_python = str(Path(__file__).parent.parent.parent / ".venv" / "bin" / "python")
-
-    cmd = [venv_python, "-m", "claude_memory.cli", "ingest"]
-    if model:
-        cmd.extend(["--model", model])
-    if force:
-        cmd.append("--force")
-
-    try:
-        # Launch as detached background process
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception as e:
-        return [TextContent(type="text", text=f"Failed to start ingestion: {e}")]
-
-    from .ingest import get_pending_sessions
-    from .parser import parse_session_file
-    from .extractor import count_chunks, count_chunks_incremental
-    pending_refs = get_pending_sessions()
-    count = len(pending_refs)
-
-    # Estimate time: ~30s per chunk with sonnet
-    total_chunks = 0
-    for path, _h, old_turn_count in pending_refs:
-        session = parse_session_file(path)
-        if not session:
-            continue
-        if old_turn_count > 0:
-            total_chunks += count_chunks_incremental(session, old_turn_count)
-        else:
-            total_chunks += count_chunks(session)
-    est_minutes = max(1, (total_chunks * 30) // 60)
-
-    lines = [f"Ingestion started in the background for {count} conversations (~{total_chunks} chunks)."]
-    lines.append(f"Estimated time: ~{est_minutes} minutes.")
-    lines.append("Tell the user approximately how long this will take.")
-    lines.append("New memories will become searchable as they are processed.")
-    lines.append("The user can continue working — this won't block anything.")
 
     return [TextContent(type="text", text="\n".join(lines))]
 
